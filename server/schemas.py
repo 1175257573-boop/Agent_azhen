@@ -36,6 +36,25 @@ class ResumeRequest(BaseModel):
     decisions: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class QueueIn(BaseModel):
+    """把一条用户输入排进队列（Agent 忙碌时用）。"""
+
+    thread_id: str = "atlas-main"
+    message: str = Field(..., description="要排队发送的内容")
+    item_id: str | None = Field(default=None, description="编辑已有排队项时传它的 id")
+
+
+class QueuedOut(BaseModel):
+    """一条排队中的消息。"""
+
+    id: str
+    thread_id: str
+    text: str
+    seq: int = 0
+    created_at: float = 0.0
+    preview: str = ""
+
+
 class PreferenceIn(BaseModel):
     """写一条长期偏好。"""
 

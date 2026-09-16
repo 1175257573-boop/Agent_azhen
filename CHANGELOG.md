@@ -42,6 +42,21 @@
 - `tests/test_mcp_servers.py`：28 个用例（用例总数 47 → 75），重点钉住
   路径越界防护、密钥输出打码、不泄漏本机绝对路径。
 
+- **排队消息（queued messages）**：Agent 忙碌时用户的输入先入队，本轮结束后由服务端
+  自动按先进先出执行，行为对齐 WorkBuddy。核心在 `agent_kit/queue.py`：
+  · 用 `deque + asyncio.Event` 而不是 `asyncio.Queue`——后者拿不到「待发列表」，
+    而前端要展示「待发送 N 条」并支持撤回/编辑；
+  · 按 `thread_id` 隔离，上限 20 条（超出 429，不让 Agent 一轮后连续自言自语）；
+  · drain **复用同一条 SSE 连接**（`_run_one` → `_drain`），前端只需照常消费事件流；
+  · **遇到人工确认（HITL）立即停止 drain**——中断未决时灌新消息会与中断状态冲突，
+    剩余消息留到 `resume` 之后再发；
+  · 同步 `stream` / `astream` / `resume` / `aresume` 四条链路全部支持。
+- 新增 REST：`POST|GET|DELETE /api/chat/queue`（入队 / 列出 / 撤回 / 清空）。
+- 前端：输入框上方显示「待发送 N 条」列表，支持撤回、取回修改、全部撤回；
+  忙碌时发送按钮变为「排队」而非禁用；`queued_start` 事件把气泡从「待发送」转为正式消息。
+- `tests/test_queue.py` 16 个用例（总数 75 → 91），钉住先进先出、会话隔离、
+  队列上限，以及 HITL 时停止 drain 这条最容易回归的边界。
+
 ### 修正
 
 - **MCP 技术选型说明改为引用官方依据**：原先写作「课程资料用的是 `MultiServerMCPClient`」，

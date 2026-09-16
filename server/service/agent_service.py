@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from agent_kit.app import MODE_HELP, AppConfig, BuiltApp, build_app, build_app_async
+from agent_kit.queue import QueueRegistry
 from agent_kit.streaming import astream_events, stream_events, text_of_message
 
 # 缓存键：(mode, provider, user_id, role, enable_mcp)
@@ -31,6 +32,31 @@ class AgentService:
     def __init__(self) -> None:
         self._apps: dict[AppKey, BuiltApp] = {}
         self._locks: dict[AppKey, Any] = {}
+        # 排队消息：Agent 忙碌期间的用户输入缓存在这里，本轮结束后自动发出
+        self._queues = QueueRegistry()
+
+    # ------------------------------------------------------------ 排队消息
+    @property
+    def queues(self) -> QueueRegistry:
+        return self._queues
+
+    def enqueue(self, *, thread_id: str, text: str) -> dict:
+        """把用户输入排进队列（Agent 忙碌时前端走这条路）。"""
+        item = self._queues.get(thread_id).enqueue(text)
+        return item.to_dict()
+
+    def queue_pending(self, *, thread_id: str) -> list[dict]:
+        return [item.to_dict() for item in self._queues.get(thread_id).pending()]
+
+    def queue_update(self, *, thread_id: str, item_id: str, text: str) -> dict | None:
+        item = self._queues.get(thread_id).update(item_id, text)
+        return item.to_dict() if item else None
+
+    def queue_remove(self, *, thread_id: str, item_id: str) -> bool:
+        return self._queues.get(thread_id).remove(item_id)
+
+    def queue_clear(self, *, thread_id: str) -> int:
+        return self._queues.get(thread_id).clear()
 
     # ------------------------------------------------------------ 装配
     @staticmethod
@@ -115,13 +141,29 @@ class AgentService:
         """流式执行，产出一串给 SSE 用的事件字典。
 
         事件类型：
-            token      模型增量文本
-            tool_start 开始调用工具
-            tool_end   工具返回
-            custom     工具内部推的自定义进度
-            interrupt  需要人工确认
-            done       本轮结束
-            error      出错
+            token        模型增量文本
+            tool_start   开始调用工具
+            tool_end     工具返回
+            custom       工具内部推的自定义进度
+            interrupt    需要人工确认
+            done         本轮结束
+            queued_start 开始执行一条**排队**中的消息（前端据此把它变成正式气泡）
+            error        出错
+
+        本轮跑完后会**自动消费排队消息**（drain），见 `_drain_note`。
+        """
+        interrupted = yield from self._run_one(req, req.message)
+        if interrupted:
+            # 悬而未决的人工确认优先：此时再灌新消息会和中断状态打架，
+            # 排队内容留到用户确认完（resume）之后再发。
+            return
+        yield from self._drain(req)
+
+    def _run_one(self, req: Any, text: str, queued_id: str | None = None) -> Iterator[dict[str, Any]]:
+        """执行**一条**消息，返回本轮是否触发了人工确认。
+
+        用 `return` 而不是全局变量，是因为调用方（stream / resume）需要这个结果
+        来决定要不要继续 drain——这是生成器 `return` 值最自然的用法（PEP 380）。
         """
         app = self.get(
             mode=req.mode,
@@ -130,7 +172,8 @@ class AgentService:
             role=req.role,
             thread_id=req.thread_id,
         )
-        payload = self._payload(app, req.message)
+        payload = self._payload(app, text)
+        interrupted = False
 
         try:
             for kind, data in stream_events(
@@ -148,11 +191,42 @@ class AgentService:
                 elif kind == "custom":
                     yield {"type": "custom", "data": str(data)}
                 elif kind == "updates":
-                    yield from self._on_update(data)
+                    for event in self._on_update(data):
+                        if event["type"] == "interrupt":
+                            interrupted = True
+                        yield event
 
-            yield {"type": "done", "data": {"thread_id": req.thread_id}}
+            yield {
+                "type": "done",
+                "data": {
+                    "thread_id": req.thread_id,
+                    "queued_id": queued_id,
+                    "pending": len(self._queues.get(req.thread_id)),
+                },
+            }
         except Exception as exc:  # noqa: BLE001
             yield {"type": "error", "data": f"{type(exc).__name__}: {exc}"}
+
+        return interrupted
+
+    def _drain(self, req: Any) -> Iterator[dict[str, Any]]:
+        """把排队中的消息按先进先出依次执行完（复用同一条 SSE 连接）。
+
+        为什么放在同一个生成器里：
+        重新开一个 HTTP 请求要重新装配/取状态，且前端要额外的轮询才能知道
+        「排队消息被消费了」。复用连接时，前端只要像往常一样消费事件流，
+        体验上就是「Agent 连续处理了你的好几条指令」。
+        """
+        queue = self._queues.get(req.thread_id)
+        while True:
+            item = queue.pop()
+            if item is None:
+                return
+            # 先告诉前端这条排队消息已经开始执行了，它才能把「待发送」气泡转正
+            yield {"type": "queued_start", "data": item.to_dict()}
+            interrupted = yield from self._run_one(req, item.text, queued_id=item.id)
+            if interrupted:
+                return
 
     def resume(self, req: Any) -> Iterator[dict[str, Any]]:
         """人工确认后继续执行。"""
@@ -164,6 +238,7 @@ class AgentService:
             thread_id=req.thread_id,
         )
         command = Command(resume={"decisions": req.decisions})
+        interrupted = False
         try:
             for kind, data in stream_events(
                 app.graph,
@@ -178,10 +253,23 @@ class AgentService:
                     if piece:
                         yield {"type": "token", "data": piece}
                 elif kind == "updates":
-                    yield from self._on_update(data)
-            yield {"type": "done", "data": {"thread_id": req.thread_id}}
+                    for event in self._on_update(data):
+                        if event["type"] == "interrupt":
+                            interrupted = True
+                        yield event
+            yield {
+                "type": "done",
+                "data": {
+                    "thread_id": req.thread_id,
+                    "pending": len(self._queues.get(req.thread_id)),
+                },
+            }
         except Exception as exc:  # noqa: BLE001
             yield {"type": "error", "data": f"{type(exc).__name__}: {exc}"}
+
+        # 确认完这一轮，之前被中断挡下的排队消息现在可以发了
+        if not interrupted:
+            yield from self._drain(req)
 
     def _on_update(self, data: Any) -> Iterator[dict[str, Any]]:
         """把图节点的状态增量翻译成前端看得懂的事件。"""
@@ -212,12 +300,26 @@ class AgentService:
 
     # ------------------------------------------------------------ 异步执行（MCP）
     async def astream(self, req: Any):
-        """异步流式，MCP 场景专用（MCP 工具没有同步实现）。"""
+        """异步流式，MCP 场景专用（MCP 工具没有同步实现）。
+
+        排队逻辑与同步版一致，只是无法用生成器的 `return` 传状态
+        （async generator 不允许 return 带值），所以改用标志位。
+        """
+        interrupted = False
+        async for event in self._arun_one(req, req.message):
+            if event["type"] == "interrupt":
+                interrupted = True
+            yield event
+        if not interrupted:
+            async for event in self._adrain(req):
+                yield event
+
+    async def _arun_one(self, req: Any, text: str, queued_id: str | None = None):
         app = await self.aget(
             mode=req.mode, provider=req.provider, user_id=req.user_id,
             role=req.role, thread_id=req.thread_id, enable_mcp=getattr(req, "enable_mcp", True),
         )
-        payload = self._payload(app, req.message)
+        payload = self._payload(app, text)
         try:
             async for kind, data in astream_events(
                 app.graph,
@@ -236,9 +338,33 @@ class AgentService:
                 elif kind == "updates":
                     for ev in self._on_update(data):
                         yield ev
-            yield {"type": "done", "data": {"thread_id": req.thread_id, "mcp": True}}
+            yield {
+                "type": "done",
+                "data": {
+                    "thread_id": req.thread_id,
+                    "mcp": True,
+                    "queued_id": queued_id,
+                    "pending": len(self._queues.get(req.thread_id)),
+                },
+            }
         except Exception as exc:  # noqa: BLE001
             yield {"type": "error", "data": f"{type(exc).__name__}: {exc}"}
+
+    async def _adrain(self, req: Any):
+        """异步版 drain，语义与 `_drain` 完全一致。"""
+        queue = self._queues.get(req.thread_id)
+        while True:
+            item = queue.pop()
+            if item is None:
+                return
+            yield {"type": "queued_start", "data": item.to_dict()}
+            interrupted = False
+            async for event in self._arun_one(req, item.text, queued_id=item.id):
+                if event["type"] == "interrupt":
+                    interrupted = True
+                yield event
+            if interrupted:
+                return
 
     async def aresume(self, req: Any):
         """MCP 场景下的人工确认恢复。"""
@@ -247,6 +373,7 @@ class AgentService:
             role=req.role, thread_id=req.thread_id, enable_mcp=getattr(req, "enable_mcp", True),
         )
         command = Command(resume={"decisions": req.decisions})
+        interrupted = False
         try:
             async for kind, data in astream_events(
                 app.graph, command,
@@ -260,10 +387,22 @@ class AgentService:
                         yield {"type": "token", "data": piece}
                 elif kind == "updates":
                     for ev in self._on_update(data):
+                        if ev["type"] == "interrupt":
+                            interrupted = True
                         yield ev
-            yield {"type": "done", "data": {"thread_id": req.thread_id}}
+            yield {
+                "type": "done",
+                "data": {
+                    "thread_id": req.thread_id,
+                    "pending": len(self._queues.get(req.thread_id)),
+                },
+            }
         except Exception as exc:  # noqa: BLE001
             yield {"type": "error", "data": f"{type(exc).__name__}: {exc}"}
+
+        if not interrupted:
+            async for event in self._adrain(req):
+                yield event
 
     @staticmethod
     def _payload(app: BuiltApp, text: str) -> Any:
@@ -325,6 +464,8 @@ class AgentService:
             return False
         try:
             app.checkpointer.delete_thread(thread_id)
+            # 会话都没了，排在这条会话上的消息自然也该清掉，否则会「复活」一个已删会话
+            self._queues.drop(thread_id)
             return True
         except Exception:  # noqa: BLE001
             return False

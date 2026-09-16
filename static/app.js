@@ -9,6 +9,7 @@ const state = {
   busy: false,
   modes: {},
   enableMcp: false,   // MCP 开关：打开后本地工具 + MCP 工具一起交给模型
+  queue: [],          // 排队中的输入（Agent 忙碌时先缓存，本轮结束后自动发出）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -24,7 +25,7 @@ async function boot() {
   $('mode').value = state.mode;
   $('modeDesc').textContent = modes[state.mode] || '';
 
-  await Promise.all([loadInfo(), loadMemory(), loadThreads(), loadHistory()]);
+  await Promise.all([loadInfo(), loadMemory(), loadThreads(), loadHistory(), loadQueue()]);
   loadMcpTools(false);   // 后端若已连过 MCP，这里会直接显示工具清单
 }
 
@@ -123,6 +124,9 @@ async function switchThread(tid) {
   $('threadLabel').textContent = tid;
   await loadThreads();
   await loadHistory();
+  // 排队是会话级的，切会话要跟着换（顺便清掉本地缓存，避免串台）
+  state.queue = [];
+  await loadQueue();
 }
 
 async function loadHistory() {
@@ -205,21 +209,161 @@ function appendHitl(interrupts) {
   scrollBottom();
 }
 
+/* ---------------------------------------------------------------- 排队消息
+   Agent 一轮要跑几十秒，这期间用户的输入不能丢、也不能并发打断当前轮。
+   做法：本地 + 服务端各存一份（服务端是真相源），本轮 done 后由服务端
+   按先进先出自动执行，事件流里会给出 queued_start 通知前端「这条开始发了」。 */
+
+async function loadQueue() {
+  const items = await fetch(`/api/chat/queue?thread_id=${encodeURIComponent(state.threadId)}`).then((r) => r.json());
+  state.queue = items;
+  renderQueue();
+}
+
+function renderQueue() {
+  const box = $('queue');
+  if (!state.queue.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML =
+    `<div class="queue-head"><span>待发送 ${state.queue.length} 条 · 当前回复结束后自动依次发送</span>` +
+    `<span class="queue-clear" id="queueClear">全部撤回</span></div>` +
+    state.queue.map((q, i) =>
+      `<div class="queue-item">
+         <span class="qi-seq">${i + 1}</span>
+         <span class="qi-text">${esc(q.text)}</span>
+         <span class="qi-edit" data-id="${q.id}" title="取回输入框修改">✎</span>
+         <span class="qi-del" data-id="${q.id}" title="撤回">×</span>
+       </div>`).join('');
+
+  box.querySelectorAll('.qi-del').forEach((n) => {
+    n.onclick = async () => {
+      await fetch(`/api/chat/queue/${n.dataset.id}?thread_id=${encodeURIComponent(state.threadId)}`, { method: 'DELETE' });
+      loadQueue();
+    };
+  });
+  box.querySelectorAll('.qi-edit').forEach((n) => {
+    n.onclick = async () => {
+      const item = state.queue.find((q) => q.id === n.dataset.id);
+      if (!item) return;
+      // 取回输入框 = 删除排队项 + 内容回填，改完再回车即重新入队
+      await fetch(`/api/chat/queue/${n.dataset.id}?thread_id=${encodeURIComponent(state.threadId)}`, { method: 'DELETE' });
+      $('input').value = item.text;
+      $('input').focus();
+      loadQueue();
+    };
+  });
+  $('queueClear').onclick = async () => {
+    await fetch(`/api/chat/queue?thread_id=${encodeURIComponent(state.threadId)}`, { method: 'DELETE' });
+    loadQueue();
+  };
+}
+
+async function enqueue(text) {
+  const r = await fetch('/api/chat/queue', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thread_id: state.threadId, message: text }),
+  });
+  if (r.status === 429) {
+    hint('排队已满（20 条），等当前回复结束后再发');
+    return false;
+  }
+  if (!r.ok) return false;
+  state.queue.push(await r.json());
+  renderQueue();
+  hint('已加入队列，当前回复结束后自动发送');
+  return true;
+}
+
+let hintTimer = null;
+function hint(text, ms = 2600) {
+  const el = $('composerHint');
+  if (!el.dataset.origin) el.dataset.origin = el.textContent;
+  el.textContent = text;
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => { el.textContent = el.dataset.origin; }, ms);
+}
+
 /* ---------------------------------------------------------------- 发送 */
+function startAssistant() {
+  const node = appendMessage('assistant', '', {});
+  return { node, textEl: node.querySelector('.text'), pending: '' };
+}
+
+/** 消费一条 SSE 流；ctx 是当前 assistant 气泡，queued_start 会换成新气泡 */
+async function consume(res, ctx) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop();
+    for (const part of parts) {
+      if (!part.startsWith('data: ')) continue;
+      const ev = JSON.parse(part.slice(6));
+      ctx = applyEvent(ev, ctx);
+    }
+  }
+  if (!ctx.pending) ctx.textEl.textContent = '（无输出）';
+}
+
+function applyEvent(ev, ctx) {
+  if (ev.type === 'token') {
+    ctx.pending += ev.data;
+    ctx.textEl.textContent = ctx.pending;
+    scrollBottom();
+  } else if (ev.type === 'tool_start') {
+    appendTool(ev.data.name, 'start');
+  } else if (ev.type === 'tool_end') {
+    appendTool(ev.data.name, 'end', ev.data.output);
+  } else if (ev.type === 'custom') {
+    appendTool(ev.data, 'start');
+  } else if (ev.type === 'interrupt') {
+    appendHitl(ev.data);
+  } else if (ev.type === 'error') {
+    ctx.textEl.textContent = `[出错] ${ev.data}`;
+  } else if (ev.type === 'queued_start') {
+    // 排队消息开始执行：补完上一条回复，插入正式的用户气泡，再开一条新的 assistant
+    if (!ctx.pending) ctx.textEl.textContent = '（无输出）';
+    appendMessage('user', ev.data.text, {});
+    state.queue = state.queue.filter((q) => q.id !== ev.data.id);
+    renderQueue();
+    return startAssistant();
+  } else if (ev.type === 'done') {
+    loadQueue();
+  }
+  return ctx;
+}
+
+function setBusy(on) {
+  state.busy = on;
+  // 忙碌时按钮不禁用——点它是「排队」而不是「丢弃输入」
+  $('send').textContent = on ? '排队' : '发送';
+  $('send').classList.toggle('queuing', on);
+}
+
 async function send() {
-  if (state.busy) return;
   const text = $('input').value.trim();
   if (!text) return;
   $('input').value = '';
   $('input').style.height = 'auto';
 
-  appendMessage('user', text, {});
-  state.busy = true;
-  $('send').disabled = true;
+  // Agent 正在工作：入队，等本轮结束自动发出（WorkBuddy 的排队行为）
+  if (state.busy) {
+    const ok = await enqueue(text);
+    if (!ok) $('input').value = text;   // 入队失败就把内容还给用户，别吞掉
+    return;
+  }
 
-  const assistant = appendMessage('assistant', '', {});
-  const textEl = assistant.querySelector('.text');
-  let pending = '';
+  appendMessage('user', text, {});
+  setBusy(true);
 
   const res = await fetch('/api/chat/stream', {
     method: 'POST',
@@ -233,41 +377,9 @@ async function send() {
       enable_mcp: state.enableMcp,
     }),
   });
+  await consume(res, startAssistant());
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const parts = buf.split('\n\n');
-    buf = parts.pop();
-    for (const part of parts) {
-      if (!part.startsWith('data: ')) continue;
-      const ev = JSON.parse(part.slice(6));
-      if (ev.type === 'token') {
-        pending += ev.data;
-        textEl.textContent = pending;
-        scrollBottom();
-      } else if (ev.type === 'tool_start') {
-        appendTool(ev.data.name, 'start');
-      } else if (ev.type === 'tool_end') {
-        appendTool(ev.data.name, 'end', ev.data.output);
-      } else if (ev.type === 'custom') {
-        appendTool(ev.data, 'start');
-      } else if (ev.type === 'interrupt') {
-        appendHitl(ev.data);
-      } else if (ev.type === 'error') {
-        textEl.textContent = `[出错] ${ev.data}`;
-      }
-    }
-  }
-
-  if (!pending) textEl.textContent = '（无输出）';
-  state.busy = false;
-  $('send').disabled = false;
+  setBusy(false);
   loadThreads();
   loadMemory();
 }
@@ -285,26 +397,9 @@ async function resume(decisions) {
       decisions,
     }),
   });
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  const assistant = appendMessage('assistant', '', {});
-  const textEl = assistant.querySelector('.text');
-  let buf = '', pending = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const parts = buf.split('\n\n');
-    buf = parts.pop();
-    for (const part of parts) {
-      if (!part.startsWith('data: ')) continue;
-      const ev = JSON.parse(part.slice(6));
-      if (ev.type === 'token') { pending += ev.data; textEl.textContent = pending; scrollBottom(); }
-      else if (ev.type === 'tool_start') appendTool(ev.data.name, 'start');
-      else if (ev.type === 'tool_end') appendTool(ev.data.name, 'end', ev.data.output);
-      else if (ev.type === 'error') textEl.textContent = `[出错] ${ev.data}`;
-    }
-  }
+  setBusy(true);
+  await consume(res, startAssistant());
+  setBusy(false);
   loadThreads();
 }
 

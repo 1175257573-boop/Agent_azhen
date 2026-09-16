@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from server.schemas import ChatRequest, MessageOut, ResumeRequest, ThreadBrief
+from server.schemas import ChatRequest, MessageOut, QueuedOut, QueueIn, ResumeRequest, ThreadBrief
 from server.service.agent_service import AgentService, new_thread_id
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -101,6 +101,49 @@ async def mcp_tools(connect: bool = True, mode: str = "chat", provider: str | No
     except Exception as exc:  # noqa: BLE001 —— MCP 连不上不能让整个页面挂掉
         raise HTTPException(status_code=502, detail=f"MCP 连接失败：{type(exc).__name__}: {exc}")
     return {"connected": bool(names), "tools": names}
+
+
+# ---------------------------------------------------------------- 排队消息
+# 存在的理由：Agent 一轮要跑几十秒，这期间用户的输入不能丢、也不能并发打断当前轮。
+# 做法是「入队 → 本轮 done 后由服务端自动按序执行」，前端只负责展示与增删改。
+@router.get("/queue", response_model=list[QueuedOut])
+def queue_list(thread_id: str = "atlas-main"):
+    """列出该会话中等待发送的消息。"""
+    return _svc().queue_pending(thread_id=thread_id)
+
+
+@router.post("/queue", response_model=QueuedOut)
+def queue_add(req: QueueIn):
+    """入队一条消息；带 item_id 时表示编辑已有的排队项。
+
+    队列满（20 条）返回 429——宁可让前端明确提示，也不要静默丢弃用户的输入。
+    """
+    svc = _svc()
+    try:
+        if req.item_id:
+            updated = svc.queue_update(thread_id=req.thread_id, item_id=req.item_id, text=req.message)
+            if updated:
+                return updated
+        return svc.enqueue(thread_id=req.thread_id, text=req.message)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:  # QueueFullError
+        raise HTTPException(status_code=429, detail=str(exc))
+
+
+@router.delete("/queue/{item_id}")
+def queue_remove(item_id: str, thread_id: str = "atlas-main"):
+    """撤回一条还没发出的排队消息。"""
+    ok = _svc().queue_remove(thread_id=thread_id, item_id=item_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到该排队项（可能已经发出）")
+    return {"ok": True, "id": item_id}
+
+
+@router.delete("/queue")
+def queue_clear(thread_id: str = "atlas-main"):
+    """清空该会话的排队消息（切会话 / 中止生成时用）。"""
+    return {"ok": True, "cleared": _svc().queue_clear(thread_id=thread_id)}
 
 
 @router.get("/history", response_model=list[MessageOut])

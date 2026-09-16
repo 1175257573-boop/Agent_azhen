@@ -62,11 +62,12 @@
       <div class="messages" id="messages" data-page-node-id="gSoRaWqfAwbIZCLTEdP9Kk"></div>
 
       <div class="composer" data-page-node-id="M7G00EeC7l901xOOJvKUyD">
+        <div class="queue" id="queue" hidden></div>
         <div class="row" data-page-node-id="GgWZkzmUiHAf4VQjG40zXR">
           <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
           <button class="send" id="send" data-page-node-id="Et7xpbtZqwD2tEwb8bWC3M">发送</button>
         </div>
-        <div class="hint" data-page-node-id="nHRVxOx3tR09zuuEE52t63">短期记忆存 Redis（消息窗口），长期记忆存 PostgreSQL；写文件类操作会触发人工确认。</div>
+        <div class="hint" id="composerHint" data-page-node-id="nHRVxOx3tR09zuuEE52t63">短期记忆存 Redis（消息窗口），长期记忆存 PostgreSQL；写文件类操作会触发人工确认。</div>
       </div>
     </main>
 

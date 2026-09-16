@@ -98,6 +98,7 @@ flowchart TB
 | [5.1 记忆层](#sec5-1) | Redis 短期 + PostgreSQL 长期 |
 | [5.2 Multi-Agent 防护](#sec5-2) | 跑偏拦截 + 循环拦截 |
 | [5.3 Skill 与 MCP](#sec5-3) | 方法论 vs 能力，三层渐进式披露 |
+| [5.4 排队消息](#sec5-4) | Agent 忙碌时的输入缓存与自动发出 |
 | [6. MCP](#sec6) | 技术选型、叠加用法、为什么必须异步 |
 | [7. 关键认知](#sec7) | 实测踩过的坑 |
 | [7.1 测试与 CI](#sec7-1) | 27 个用例 + GitHub Actions |
@@ -420,6 +421,44 @@ python main.py chat --mode skills      # 交互使用
 2. **content 里必须写「取证工具」和「输出格式」**，否则模型拿到 SOP 仍然会自由发挥。
 3. **SOP 要写「未覆盖」一栏**——不说清自己没查什么，读者会误以为是全量检查。
 
+<a id="sec5-4"></a>
+## 5.4 排队消息：Agent 忙碌时的输入不丢也不打断
+
+一轮 Agent 要跑几十秒，这期间用户输入的第二条、第三条指令怎么办？两个错误答案：
+直接丢弃（用户得重打一遍）、立刻并发发给 Agent（打断当前这轮的上下文）。
+本项目采用与 WorkBuddy 一致的**排队**方案：`agent_kit/queue.py`。
+
+```
+用户在 Agent 忙碌时输入  →  入队（服务端为真相源，按 thread_id 隔离）
+                        ↓
+                   前端显示「待发送 N 条」，可撤回 / 取回修改
+                        ↓
+              当前轮 done → 服务端自动按先进先出执行（复用同一条 SSE 连接）
+                        ↓
+              事件流给出 queued_start → 前端把该气泡从「待发送」转为正式消息
+```
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/chat/queue` | 入队（带 `item_id` 则是编辑已有排队项）；队列满返回 429 |
+| `GET /api/chat/queue?thread_id=` | 列出待发消息 |
+| `DELETE /api/chat/queue/{id}` | 撤回一条 |
+| `DELETE /api/chat/queue?thread_id=` | 清空 |
+
+**四个设计决定**
+
+1. **服务端是真相源**，前端只做展示。刷新页面后排队内容还在，不会因为前端状态丢失而"吞掉"用户输入。
+2. **drain 复用同一条 SSE 连接**（`_run_one` 跑完 → `_drain` 继续取下一条），
+   而不是让前端轮询或重开请求：少一次连接，且前端只需像往常一样消费事件流。
+3. **遇到人工确认（HITL）立刻停止 drain**。中断悬而未决时灌新消息会和中断状态打架，
+   剩下的排队消息留到用户确认完（`resume`）再发——测试 `test_drain_stops_at_human_interrupt` 钉住这条。
+4. **队列上限 20 条**，超出返回 429 让前端明确提示。没有上限时用户狂敲回车会让
+   Agent 一轮结束后连续自言自语几十轮。
+
+> **CLI 为什么不做**：终端里 agent 输出期间敲的内容由 TTY 行缓冲，
+> 下一个 `input()` 会立刻读到，效果上已经接近排队；真做成可见队列需要后台线程读
+> stdin，会和主线程的 `input()` 争抢、且有跨平台差异，收益不抵风险。
+
 <a id="sec6"></a>
 ## 6. 技术决策：MCP 走哪套 API
 
@@ -576,7 +615,7 @@ python examples/mcp_servers_demo.py    # 真实拉起 4 个 stdio 子进程并�
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 75 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 91 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
 python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 ```
@@ -586,7 +625,7 @@ python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 在 Python 3.10 / 3.12 上跑 ruff + pytest，外加 fake 模型的 8 场景冒烟、
 7 模式装配、防护演示与 MCP 协议连通）。
 
-五个测试文件各自钉住一类易回归点：
+六个测试文件各自钉住一类易回归点：
 
 | 文件 | 钉住什么 |
 |---|---|
@@ -595,6 +634,7 @@ python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 | `tests/test_app_modes.py` | 7 个模式能装配；无 Key 必须明确报错；显式 `fake` 放行 |
 | `tests/test_guards.py` | 跑偏 / 循环两类防护的判据（含两种模式下 `A→B→A` 的相反语义） |
 | `tests/test_mcp_servers.py` | 路径越界防护、密钥输出打码、不泄漏本机绝对路径 |
+| `tests/test_queue.py` | 排队消息的先进先出、会话隔离、上限，以及 HITL 时停止 drain |
 
 ### 统一异常处理（对标 Spring 的 @ControllerAdvice）
 
