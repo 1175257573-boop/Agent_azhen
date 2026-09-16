@@ -1,0 +1,16 @@
+# 统一换行符：提交进仓库一律 LF，避免 Windows 贡献者把 CRLF 带进来
+# 造成整个文件的 diff 噪音（也避免 Linux 上 .sh 脚本因 CRLF 跑不起来）。
+* text=auto eol=lf
+
+# 明确声明二进制，禁止做任何换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary
+*.zip binary

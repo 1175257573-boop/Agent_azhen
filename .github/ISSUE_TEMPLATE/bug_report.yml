@@ -1,0 +1,91 @@
+name: 🐛 缺陷报告
+description: 遇到了报错或行为不符合预期
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！下面几项填全，能省掉一轮来回追问。
+        **提交前请确认：没有把 API Key、DSN 密码、个人信息粘贴进来。**
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么？期望是什么？
+      placeholder: |
+        期望：chat 模式开启 MCP 后能列出工具
+        实际：报 NotImplementedError
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 从干净环境开始，1、2、3 列清楚
+      placeholder: |
+        1. pip install -r requirements.txt
+        2. setx DASHSCOPE_API_KEY xxx
+        3. python main.py chat --mcp
+        4. 输入「今天几号」
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: 完整报错
+      description: 请贴完整堆栈，不要只贴最后一行
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本信息
+      description: 跑 `python main.py info` 的输出，或手动填写
+      placeholder: "langchain 1.4.0 / langgraph 1.2.11 / Python 3.12.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 运行模式
+      options:
+        - chat
+        - structured
+        - tools
+        - mcp
+        - skills
+        - handoffs
+        - subagents
+        - router
+        - web（FastAPI）
+        - 其它 / 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - WSL
+    validations:
+      required: true
+
+  - type: textarea
+    id: memory-backend
+    attributes:
+      label: 记忆后端
+      description: Redis / PostgreSQL 是否启用？跑 `python check_env.py` 的输出贴上来更省事
+      placeholder: "SHORT_TERM_BACKEND=memory，LONG_TERM_BACKEND=postgres"
+    validations:
+      required: false

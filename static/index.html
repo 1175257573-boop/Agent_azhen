@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="ZRRfIuJOWtSeSQJ7spy9FD">
+<head data-page-node-id="jjbXuCMOnWmYs21E55Oy55">
+  <meta charset="utf-8" data-page-node-id="GPxjMRHpPQ0QjUdbrf2eGq" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="72Hr3Gu5LomypLoUUrHpbp" />
+  <title>Atlas · LangChain 1.4 Agent</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/style.css" data-page-node-id="HFpGc4rzge0BExobsRU3uF" />
+</head>
+<body data-page-node-id="IDfhEl0JUKi5BSNv01vJ28">
+  <div class="layout" data-page-node-id="wCPXV1fIWJYOivSPqls8Dh">
+    <!-- 左栏：会话与设置 -->
+    <aside class="sidebar" data-page-node-id="z2u7SJU1nW2B4CpN1T16Hf">
+      <div class="brand" data-page-node-id="Y9DIyskrpsBzmHiQUoSWyq">
+        <h1 data-page-node-id="a2ud0B7yv2aodzeTHo8FMy">Atlas Agent</h1>
+        <p data-page-node-id="lOKrDhwftKxoN67BAc4Q0D">LangChain 1.4 · LangGraph</p>
+      </div>
+
+      <div class="section" data-page-node-id="rIlFyRKk6eSH1PGAVD8HiN">
+        <button class="btn primary" id="newThread" data-page-node-id="cJmm7FvVsYyCoAmyhXBH7o">+ 新建会话</button>
+      </div>
+
+      <div class="section" data-page-node-id="iFVjFCewGUPqHCbg1qEu06">
+        <h2 data-page-node-id="40PtGZ1ZsrvoG12bCKuSGt">能力模式</h2>
+        <select id="mode" data-page-node-id="evFIqx7b8pAgMl6uf9a4mS"></select>
+        <p class="empty" id="modeDesc" style="margin:8px 0 0" data-page-node-id="aac1Dhji2plLPECXapoQyj"></p>
+      </div>
+
+      <div class="section" data-page-node-id="mcp-sec-1">
+        <h2>MCP 工具</h2>
+        <label class="switch" for="mcpToggle">
+          <input type="checkbox" id="mcpToggle" />
+          <span>接入 MCP Server</span>
+        </label>
+        <div id="mcpTools" class="empty" style="margin-top:8px">未连接（勾选后自动连接）</div>
+      </div>
+
+      <div class="section" data-page-node-id="FKQwfO3spppTDr0kWLaj6r">
+        <h2 data-page-node-id="mnOfiYL50QFz7OD2LV98AF">用户 / 角色</h2>
+        <input type="text" id="userId" value="demo" placeholder="user_id" style="margin-bottom:6px" data-page-node-id="vTA54jJLTnI4OlQA1A4h6t" />
+        <select id="role" data-page-node-id="R6HSuJLOCRCWZjzLdnURbK">
+          <option value="admin" data-page-node-id="nQN7AHlHLq1c5D0boatp1Z">admin（可写文件）</option>
+          <option value="user" data-page-node-id="u3yJMOaT9C8DvuCOA8xiOt">user（只读）</option>
+        </select>
+      </div>
+
+      <div class="section scroll" data-page-node-id="kByVFAGtqsqXzTfTCvNqBo">
+        <h2 data-page-node-id="fY25QptjoFunaB1DztZ0dx">会话列表</h2>
+        <div id="threads" data-page-node-id="sTT33vg5PdC33P0i2bEdfZ"></div>
+      </div>
+    </aside>
+
+    <!-- 中栏：对话 -->
+    <main class="main" data-page-node-id="MG6wuBBiAynGJS0FW7XtLJ">
+      <div class="topbar" data-page-node-id="EAQYYwTYHKOuSD6kGbbBpk">
+        <span class="title" id="threadLabel" data-page-node-id="MYpzGrbQZ8v0kBEhmJj8OQ">atlas-main</span>
+        <span class="badge" id="modeBadge" data-page-node-id="3mwCP07TXws4B19DeGHRNZ">chat</span>
+        <span class="badge" id="memBadge" data-page-node-id="gATRYa16XqcQFo5eixZ2XV">记忆层</span>
+        <span class="meta" id="modelMeta" data-page-node-id="KEwCK7xaIhfRH8BCb2TKaE"></span>
+      </div>
+
+      <div class="messages" id="messages" data-page-node-id="gSoRaWqfAwbIZCLTEdP9Kk"></div>
+
+      <div class="composer" data-page-node-id="M7G00EeC7l901xOOJvKUyD">
+        <div class="row" data-page-node-id="GgWZkzmUiHAf4VQjG40zXR">
+          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <button class="send" id="send" data-page-node-id="Et7xpbtZqwD2tEwb8bWC3M">发送</button>
+        </div>
+        <div class="hint" data-page-node-id="nHRVxOx3tR09zuuEE52t63">短期记忆存 Redis（消息窗口），长期记忆存 PostgreSQL；写文件类操作会触发人工确认。</div>
+      </div>
+    </main>
+
+    <!-- 右栏：记忆层 -->
+    <aside class="sidebar right" data-page-node-id="dAgANCWB5EkXCft2lfPmsB">
+      <div class="brand" data-page-node-id="RfCa17GKaBZwNERTNGSFfu">
+        <h1 data-page-node-id="Vc6w6FDyxcR6qrQzVpEbxB">记忆层</h1>
+        <p data-page-node-id="WUnnUVCn45PnDhWN9JJS4k">短期 Redis / 长期 PostgreSQL</p>
+      </div>
+
+      <div class="section" data-page-node-id="zCETKCKX16bzYxhFD8jc9v">
+        <h2 data-page-node-id="n3EqfhVH23lQltN1tSTVW3">后端状态</h2>
+        <div id="memStatus" data-page-node-id="BJS268KyyLSv2h4He5UQaD"></div>
+      </div>
+
+      <div class="section" data-page-node-id="4hrBE3G9VAROcmUbvy5tY1">
+        <h2 data-page-node-id="lXyEMtKQv1QmHAd7hYBPVE">环境与模型</h2>
+        <div id="envInfo" data-page-node-id="r8HKmAKgCFzmJc5g19TyyK"></div>
+      </div>
+
+      <div class="section scroll" data-page-node-id="yt90NuLfMYCtjZ0INtzDRW">
+        <h2 data-page-node-id="7FXnH7hmPKGnI4W1ukBhdC">长期偏好</h2>
+        <div id="prefs" data-page-node-id="OpPvmZ1TBCHnbuEQqtNEsJ"></div>
+        <div style="display:flex;gap:6px;margin-top:10px" data-page-node-id="GXi9KGEJGGCn6SBgcKDF6Q">
+          <input type="text" id="prefKey" placeholder="键" style="flex:1" data-page-node-id="AVG2ZVxlj9AnmayxtRsrIO" />
+          <input type="text" id="prefVal" placeholder="值" style="flex:1" data-page-node-id="WgUQlu72cXD5NCpjUfJcfB" />
+          <button class="btn tiny" id="prefAdd" data-page-node-id="wXpk2wOqbFC9ENLmDA2UmR">加</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+name: ✨ 功能建议
+description: 想要新能力，或者觉得现有设计可以更好
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决什么问题
+      description: 先讲痛点，再讲方案。只写「希望支持 XXX」不好判断优先级
+      placeholder: "目前 MCP 工具只能全局开关，我想按会话控制"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你设想的方案
+      description: 有想法就写，没有就留空，我们一起讨论
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及模块
+      options:
+        - Agent / 模式
+        - 中间件
+        - MCP
+        - 多智能体
+        - 记忆层
+        - FastAPI 后端
+        - Web 前端
+        - CLI / 工程化
+        - 文档
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 有没有不改代码就能绕过的办法？
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: 参与
+      options:
+        - label: 我愿意提 PR 实现这个功能

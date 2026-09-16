@@ -1,0 +1,29 @@
+# 已在 conda env `langchain` (Python 3.12.14) 验证通过
+langchain==1.4.0
+langchain-core==1.6.3
+langchain-openai==1.6.2
+langchain-anthropic==1.7.2
+langgraph==1.2.11
+langchain-protocol==0.0.19
+mcp==2.2.0
+fastmcp==4.0.4
+requests==2.34.2
+pydantic==2.13.5
+
+# 记忆后端（已验证版本）
+# 短期记忆：Redis（消息窗口 + TTL）；长期记忆：PostgreSQL
+langgraph-checkpoint-redis==0.5.2
+langgraph-checkpoint-postgres==3.1.2
+psycopg[binary]==3.3.5
+redis==8.1.0
+
+# 可选：不想起 Redis / PG 时，用 sqlite 落盘（代码里 sqlite 分支会自动降级）
+# langgraph-checkpoint-sqlite==4.0.0
+# langgraph-store-sqlite==1.0.0
+
+# Web 框架（FastAPI + ASGI 服务器）
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+
+# 可选：读取项目根目录的 .env 兜底环境变量（缺失则静默跳过，不影响运行）
+python-dotenv==1.2.3

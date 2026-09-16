@@ -1,0 +1,51 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ---------- 虚拟环境 ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.settings/
+.project
+.classpath
+
+# ---------- 本项目运行时产物 ----------
+runs/
+*.sqlite
+*.sqlite-journal
+checkpoints.sqlite
+
+# ---------- 密钥：任何情况下都不入库 ----------
+.env
+.env.*
+# 但样例文件必须入库（否则别人克隆下来不知道该配什么）
+!.env.example
+*.key
+*.pem
+*.p12
+secrets/
+credentials.json
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini

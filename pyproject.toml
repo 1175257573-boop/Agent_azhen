@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langchain-v14-demo"
+version = "1.0.0"
+description = "LangChain 1.4 全功能 Agent 参考套件（工具、中间件、记忆、结构化输出、流式、MCP）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "langchain==1.4.0",
+    "langchain-core==1.6.3",
+    "langchain-openai==1.6.2",
+    "langchain-anthropic==1.7.2",
+    "langgraph==1.2.11",
+    "fastmcp==4.0.4",
+    "requests>=2.32,<3",
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+# 记忆后端（推荐组合：Redis 做短期消息窗口 + PostgreSQL 做长期事实）
+redis = ["langgraph-checkpoint-redis>=0.5.0", "redis>=6.0"]
+postgres = ["langgraph-checkpoint-postgres>=3.0.0", "psycopg[binary]>=3.2"]
+# 不想起外部服务时用 sqlite 落盘（代码里已内置该分支）
+sqlite = ["langgraph-checkpoint-sqlite>=2.0.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+# Web 模式：FastAPI + 前端页面
+web = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "python-dotenv>=1.0"]
+
+# pip install -e . 之后可以直接用短命令，不必再 python xxx.py
+[project.scripts]
+agent-demo = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_kit*", "server*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = ["runs", ".venv"]
