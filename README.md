@@ -97,6 +97,7 @@ flowchart TB
 | [5. 八种能力模式](#sec5) | chat → router 逐个说明 |
 | [5.1 记忆层](#sec5-1) | Redis 短期 + PostgreSQL 长期 |
 | [5.2 Multi-Agent 防护](#sec5-2) | 跑偏拦截 + 循环拦截 |
+| [5.3 Skill 与 MCP](#sec5-3) | 方法论 vs 能力，三层渐进式披露 |
 | [6. MCP](#sec6) | 技术选型、叠加用法、为什么必须异步 |
 | [7. 关键认知](#sec7) | 实测踩过的坑 |
 | [7.1 测试与 CI](#sec7-1) | 27 个用例 + GitHub Actions |
@@ -384,6 +385,41 @@ export PG_DSN="postgresql://atlas:atlas@localhost:5432/atlas"
 已完成的部分进展、完整交接路径、下一步建议。只抛异常的话，前面消耗的算力全浪费了，
 读者也无从排查。
 
+<a id="sec5-3"></a>
+## 5.3 Skill 与 MCP：方法论 vs 能力
+
+这两件事经常被混为一谈，其实职责完全不同：
+
+| | MCP | Skill |
+|---|---|---|
+| 回答什么 | **能做什么** | **这件事该按什么步骤做** |
+| 形态 | 独立进程，通过协议调用 | 一段提示词，活在系统提示里 |
+| 跨什么复用 | 跨项目、跨语言 | 跨轮次 |
+| 成本 | 每次调用有进程/网络开销 | L1 常驻仅几十 token，L2 按需加载 |
+| 判断标准 | 要跨进程（需独立部署/隔离/多语言）→ MCP | 只是做事的方法论 → Skill |
+
+**Skill 是三层渐进式披露**（`agent_kit/multi_agent/skills.py`）：
+
+```
+L1  名称 + 一句话        → 常驻系统提示，几十个技能也才几百 token
+L2  完整 SOP            → 模型觉得需要时调 load_skill(name) 才加载
+L3  按 SOP 去调真正的工具 → 落到 MCP 工具或本地工具
+```
+
+内置技能 `project_engineering`（`agent_kit/builtin_skills.py`）：按工程化规范审查项目，
+八项检查清单（分层 / 配置 / 错误 / 日志 / 测试 / CI / 文档 / 安全）**每一项都指明用哪个
+MCP 工具取证**——没有取证就下结论，是工程评审里最典型的失真。
+
+```
+python main.py chat --mode skills      # 交互使用
+```
+
+写新 Skill 的三条经验：
+
+1. **description 写给模型看**，要能触发正确的调用时机；描述含糊，模型永远不会加载它。
+2. **content 里必须写「取证工具」和「输出格式」**，否则模型拿到 SOP 仍然会自由发挥。
+3. **SOP 要写「未覆盖」一栏**——不说清自己没查什么，读者会误以为是全量检查。
+
 <a id="sec6"></a>
 ## 6. 技术决策：MCP 走哪套 API
 
@@ -482,6 +518,35 @@ NotImplementedError: Asynchronous implementation of awrap_tool_call is not avail
 本项目的做法是 `agent_kit/tool_hooks.py` 里的 `dual(sync_fn, async_fn)` /
 `dual_model(sync_fn, async_fn)`，一对函数打包成一个中间件实例，两种链路都能跑。
 
+<a id="sec6-6"></a>
+### 6.6 本项目自带的四个 MCP Server（共 21 个工具）
+
+| Server | 工具 | 干什么 |
+|---|---|---|
+| `notes`（`mcp_server.py`） | 6 | 知识库：词频、笔记列表、进度通知、日志、Elicitation |
+| `quality`（`mcp_servers/quality.py`） | 5 | 工程质量体检：代码规模、技术债标记、疑似密钥、测试现状、依赖审计 |
+| `git`（`mcp_servers/git_history.py`） | 5 | **只读**版本控制：状态、日志、变更统计、贡献者、提交搜索 |
+| `docs`（`mcp_servers/doc_audit.py`） | 5 | 文档一致性：README 结构、锚点校验、CHANGELOG、必备文件、目录树 |
+
+```bash
+python examples/mcp_servers_demo.py    # 真实拉起 4 个 stdio 子进程并调用，零 API Key
+```
+
+新增 server 只要往 `agent_kit/mcp_client.py` 的 `ALL_SERVERS` 里加一行，Agent 侧不用改代码。
+
+**三条硬约束**（新增 server 必须遵守）：
+
+1. **路径不越界** —— 入参路径必须落在项目根内，见 `_common.resolve_dir()`。
+   只读工具一旦能读任意路径，就变成了任意文件读取口子。
+2. **输出不含秘密原文** —— 密钥只回打码片段；`localhost` 默认凭据单独降级计数，
+   不算泄密但仍提示「换环境必须改」。
+3. **输出用相对路径** —— 绝对路径会把本机目录结构泄漏给模型与日志。
+
+> **踩坑**：MCP 客户端是**当脚本启动** server 的（`python .../quality.py`），
+> 此时 `sys.path[0]` 是脚本所在目录、项目根不在其中，`import agent_kit...` 直接失败。
+> 而失败发生在 stdio 握手之前，客户端只会看到 `Connection closed`，极难定位。
+> 所以每个 server 顶部都有一段显式补 `sys.path` 的引导。
+
 <a id="sec7"></a>
 ## 7. 关键认知（实测踩坑）
 
@@ -503,13 +568,15 @@ NotImplementedError: Asynchronous implementation of awrap_tool_call is not avail
 16. 关闭 MCP 要用 `adapter.client.close()`，**不要**用 `__aexit__` —— 它退出的是 anyio 任务组，跨 task 调用会报 `Attempted to exit cancel scope in a different task`。
 17. 参数注入类拦截器不能无脑注入：工具 schema 声明「不接受任何参数」时（如 `current_utc`）注入会让 Pydantic 报 `unexpected_keyword_argument`。本项目按 schema 自动判断，见 `make_arg_injector`。
 18. Multi-Agent 的 `A→B→A` 在 Handoffs（踢皮球）与 Subagents（正常回调）里**语义相反**，环检测必须按模式分开判；判据写成 `path[-1] == path[-3]` 还会漏掉 `A→B→C→A` 四步环。
+19. MCP Server 被客户端**当脚本启动**（`python .../server.py`），项目根不在 `sys.path` 里，`import agent_kit...` 直接失败；失败发生在握手之前，客户端只报 `Connection closed`。每个 server 顶部都要显式补 `sys.path`。
+20. `@mcp.tool` 会把函数包成 `FunctionTool`，原函数就调不到了 —— 想写单元测试，必须「先写普通函数、最后 `mcp.tool(fn)` 统一注册」。
 
 <a id="sec7-1"></a>
 ## 7.1 测试与 CI
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 47 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 75 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
 python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 ```
@@ -517,9 +584,9 @@ python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 测试刻意设计成**零外部依赖**：`tests/conftest.py` 会清掉所有环境变量并切到临时目录，
 因此 GitHub Actions 里不需要起任何服务（见 `.github/workflows/ci.yml`，
 在 Python 3.10 / 3.12 上跑 ruff + pytest，外加 fake 模型的 8 场景冒烟、
-7 模式装配与防护演示）。
+7 模式装配、防护演示与 MCP 协议连通）。
 
-四个测试文件各自钉住一类易回归点：
+五个测试文件各自钉住一类易回归点：
 
 | 文件 | 钉住什么 |
 |---|---|
@@ -527,6 +594,7 @@ python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 | `tests/test_arg_injector.py` | 零参数工具（如 `current_utc`）不能被注入额外字段 |
 | `tests/test_app_modes.py` | 7 个模式能装配；无 Key 必须明确报错；显式 `fake` 放行 |
 | `tests/test_guards.py` | 跑偏 / 循环两类防护的判据（含两种模式下 `A→B→A` 的相反语义） |
+| `tests/test_mcp_servers.py` | 路径越界防护、密钥输出打码、不泄漏本机绝对路径 |
 
 ### 统一异常处理（对标 Spring 的 @ControllerAdvice）
 

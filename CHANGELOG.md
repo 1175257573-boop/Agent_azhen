@@ -23,6 +23,25 @@
 - `tests/test_guards.py`：20 个用例钉住两类防护的判据，重点防「两种模式下
   `A→B→A` 语义相反」这类回归（用例总数 27 → 47）。
 
+- **新增三个只读 MCP Server**（`agent_kit/mcp_servers/`，共 15 个工具）：
+  · `quality.py` —— 工程质量体检：代码规模、TODO/FIXME 技术债、疑似密钥（只回打码片段）、
+    测试现状、依赖是否钉版本；
+  · `git_history.py` —— 版本控制**只读**（刻意不提供 commit/push）：状态、日志、
+    变更统计、贡献者、提交搜索；
+  · `doc_audit.py` —— 文档一致性：README 结构、目录锚点校验、CHANGELOG 是否有
+    Unreleased、开源必备文件清单、目录树。
+  三条硬约束：路径不越界（越界直接报错）、输出不含秘密原文、只用相对路径。
+- **新增内置 Skill `project_engineering`**（`agent_kit/builtin_skills.py`）：
+  八项工程化检查清单（分层/配置/错误/日志/测试/CI/文档/安全），每项指明用哪个
+  MCP 工具取证，并固定「结论 → 阻断项 → 建议项 → 做得好的地方 → 未覆盖」输出格式；
+  已接入 `skills` 模式。
+- `MCPHub` 新增 `ALL_SERVERS` 注册表与 `connect_all()` / `connect_named()`，
+  新增 server 只需改一行。
+- 离线演示 `examples/mcp_servers_demo.py`：真实拉起 4 个 stdio 子进程，
+  列出 21 个工具并跨进程调用；已加入 CI 冒烟。
+- `tests/test_mcp_servers.py`：28 个用例（用例总数 47 → 75），重点钉住
+  路径越界防护、密钥输出打码、不泄漏本机绝对路径。
+
 ### 修正
 
 - **MCP 技术选型说明改为引用官方依据**：原先写作「课程资料用的是 `MultiServerMCPClient`」，

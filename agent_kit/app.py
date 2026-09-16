@@ -144,9 +144,11 @@ def build_app(cfg: AppConfig) -> BuiltApp:
         return BuiltApp(graph, cfg, settings, checkpointer, store, is_workflow=True)
 
     if cfg.mode == "skills":
+        from agent_kit.builtin_skills import PROJECT_ENGINEERING
         from agent_kit.multi_agent.skills import Skill, SkillMiddleware
 
         skills = [
+            PROJECT_ENGINEERING,
             Skill(
                 name="knowledge_search",
                 description="从本地知识库检索事实依据",

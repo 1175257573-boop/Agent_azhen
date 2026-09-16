@@ -48,6 +48,16 @@ log = logging.getLogger("agent.mcp")
 
 SERVER_PATH = Path(__file__).resolve().parent / "mcp_server.py"
 
+# 其余 MCP Server：工程质量体检 / Git 只读 / 文档一致性审计
+# 新增 server 只要往这里加一行，Agent 侧不用改代码——这正是 MCP 的价值所在。
+SERVER_DIR = Path(__file__).resolve().parent / "mcp_servers"
+ALL_SERVERS: dict[str, Path] = {
+    "notes": SERVER_PATH,
+    "quality": SERVER_DIR / "quality.py",
+    "git": SERVER_DIR / "git_history.py",
+    "docs": SERVER_DIR / "doc_audit.py",
+}
+
 
 # ---------------------------------------------------------------------------
 # 拦截器（等价于 langchain-mcp-adapters 的 tool_interceptors）
@@ -231,8 +241,19 @@ class MCPHub:
         return self.tools
 
     async def connect_default(self) -> list:
-        """连接本项目自带的 MCP Server。"""
+        """连接本项目自带的笔记 MCP Server（保持单 server 行为不变）。"""
         return await self.connect([SERVER_PATH])
+
+    async def connect_named(self, names: Iterable[str]) -> list:
+        """按名字连接部分 server，例如 connect_named(["quality", "git"])。"""
+        missing = [n for n in names if n not in ALL_SERVERS]
+        if missing:
+            raise KeyError(f"未知 MCP Server：{missing}。可用：{', '.join(ALL_SERVERS)}")
+        return await self.connect([ALL_SERVERS[n] for n in names])
+
+    async def connect_all(self) -> list:
+        """连接全部已注册的 server。"""
+        return await self.connect(list(ALL_SERVERS.values()))
 
     async def aclose(self) -> None:
         """逐个关闭 MCP 连接（收掉 stdio 子进程）。
