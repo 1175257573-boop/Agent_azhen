@@ -75,11 +75,16 @@ def build_agent(
     context_schema: Any = None,
     debug: bool = False,
     message_window: int | None = None,
+    enable_goal_anchor: bool = True,
+    budget: dict | None = None,
 ) -> BuiltAgent:
     """一站式组装 Agent。
 
     Args:
         settings: 全局配置（provider / 各种限制）
+        enable_goal_anchor: 目标锚定（防跑偏）。默认开启，state 无 original_goal 时自动跳过
+        budget: 预算闸门（防失控），形如 {"max_model_calls": 12, "max_seconds": 120}；
+            默认 None 不启用，多智能体长任务建议开启
         model: 直接指定模型实例；不传则按 provider 构造
         tools: 覆盖默认工具集
         include_write_tools: 是否装载危险写工具
@@ -121,6 +126,8 @@ def build_agent(
         enable_hitl=enable_hitl,
         readonly=readonly,
         message_window=message_window,
+        enable_goal_anchor=enable_goal_anchor,
+        budget=budget,
     )
     # 场景中间件排在内置中间件之后：先过护栏，再走场景逻辑
     middleware.extend(middleware_extra)

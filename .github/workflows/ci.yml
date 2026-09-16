@@ -68,6 +68,9 @@ jobs:
       - name: 跑全部演示场景
         run: python main.py demo -p fake
 
+      - name: Multi-Agent 防护演示（跑偏 / 循环拦截）
+        run: python main.py guards
+
       - name: 装配全部运行模式
         run: |
           python - <<'PY'

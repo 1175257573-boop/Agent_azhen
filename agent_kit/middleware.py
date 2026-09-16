@@ -163,22 +163,40 @@ def build_middleware_stack(
     enable_hitl: bool = False,
     readonly: bool = False,
     message_window: int | None = None,
+    enable_goal_anchor: bool = True,
+    budget: dict | None = None,
 ) -> list[AgentMiddleware]:
     """按职责顺序装配中间件。
 
     顺序很重要：
+      0. 预算闸门 → 最先检查，超了直接短路，省掉后续所有中间件的开销
       1. 限流 → 越早越好，省 token
       2. 自定义守卫（cosπt control）
       3. 工具重试 → 包住工具本身
       4. 上下文工程 → 模型调用前（消息窗口 / 摘要压缩，二选一）
       5. PII 脱敏 → 出入口
+      6. 目标锚定 → 最后修改 prompt，直接交给模型
 
     message_window 与 model_for_summary 是解决同一个问题（上下文膨胀）的两种策略：
       · 消息窗口：只留最近 N 条原文，简单可控，丢掉的原文仍在 Redis 里可回溯；
       · 摘要压缩：把历史压成摘要，信息密度高，但要多花一次摘要模型的调用。
     两者同时开没有意义，所以这里**窗口优先**，给了窗口就跳过摘要。
+
+    enable_goal_anchor / budget 来自 agent_kit/guards.py（Multi-Agent 防护）：
+      · goal_anchor 默认开启——state 里没有 original_goal 时自动跳过，对现有模式无副作用；
+      · budget 默认关闭（None），多智能体长任务场景建议显式传入
+        {"max_model_calls": 12, "max_seconds": 120}。
     """
-    stack: list[AgentMiddleware] = [
+    stack: list[AgentMiddleware] = []
+
+    # ---- 0. 预算闸门（最先检查，超了直接短路） ------------------------------
+    if budget is not None:
+        from agent_kit.guards import make_budget_guard
+
+        stack.append(make_budget_guard(**budget))
+
+    stack.extend(
+        [
         # ---- 1. 稳定性护栏 -------------------------------------------------
         ModelCallLimitMiddleware(
             run_limit=settings.model_call_limit,
@@ -209,7 +227,8 @@ def build_middleware_stack(
         audit_guard,
         tool_logger,
         response_guard,
-    ]
+        ]
+    )
 
     if readonly:
         stack.append(readonly_enforcer)
@@ -252,5 +271,12 @@ def build_middleware_stack(
                 description_prefix="⚠️ 即将修改文件，需要人工确认",
             )
         )
+
+    # ---- 7. 目标锚定：最后修改 prompt，直接交给模型 ------------------------
+    # 放在最内层，避免被前面的上下文工程（摘要裁剪）把锚定文本去掉。
+    if enable_goal_anchor:
+        from agent_kit.guards import make_goal_anchor
+
+        stack.append(make_goal_anchor())
 
     return stack

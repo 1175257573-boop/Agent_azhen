@@ -10,6 +10,7 @@ Python 没有启动注解，约定俗成的等价物是「入口文件 + if __na
     python main.py demo                      # 离线能力演示（8 个场景）
     python main.py check [--ping]            # 环境变量自查 / 连通性探测
     python main.py mcp                       # MCP 工具演示
+    python main.py guards                    # Multi-Agent 防护演示（跑偏 / 循环拦截）
     python main.py info                      # 打印运行环境概况
 
 等价写法：
@@ -124,6 +125,14 @@ def cmd_mcp(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_guards(_: argparse.Namespace) -> int:
+    """Multi-Agent 防护演示：跑偏拦截 + 循环拦截（离线，零 API Key）。"""
+    from examples.guards_demo import main as guards_main
+
+    guards_main()
+    return 0
+
+
 def cmd_info(_: argparse.Namespace) -> int:
     from agent_kit.app import MODE_HELP
     from agent_kit.config import DEFAULT_MODELS, AgentSettings, detect_provider, get_env_key_name
@@ -219,6 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", parents=[common], help="MCP 工具接入演示")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    p_guards = sub.add_parser("guards", parents=[common], help="Multi-Agent 防护演示（跑偏 / 循环拦截，离线）")
+    p_guards.set_defaults(func=cmd_guards)
 
     p_info = sub.add_parser("info", parents=[common], help="打印运行环境概况")
     p_info.set_defaults(func=cmd_info)

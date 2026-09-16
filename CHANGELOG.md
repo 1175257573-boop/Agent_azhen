@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Multi-Agent 防护模块 `agent_kit/guards.py`**：针对两类失控各给一套机制——
+  · 方向跑偏（目标遗忘）→ 目标锚定 `make_goal_anchor()`（每步把原始目标重注入
+    system prompt）+ 预算闸门 `make_budget_guard()`（步数 / 时间硬上限，超限带着
+    已完成的进展停下，而不是只抛异常）；
+  · 互斥循环（转移无收敛性）→ 跳数上限 + 环检测 `detect_pingpong()` + 转移白名单
+    `guard_transition()` + 单调推进判定 `is_progress()`，所有防线统一收敛到
+    `escalate` 节点，输出「进展 + 交接路径 + 下一步建议」。
+- `handoffs.py` 新增 `ALLOWED_TRANSITIONS` / `safe_next_step()`，把「模型随意跳转」
+  约束成状态机，非法转移留在当前步并累计违规，连续违规转收敛。
+- 中间件栈新增 `enable_goal_anchor`（默认开，state 无目标时自动跳过，对现有模式无副作用）
+  与 `budget`（默认关，多智能体长任务显式传入）两个参数。
+- 离线演示 `examples/guards_demo.py` + CLI 子命令 `python main.py guards`：真实建一张
+  LangGraph，两个代理互相甩锅，第 3 跳被拦下；CI 冒烟已加入该步骤。
+- `tests/test_guards.py`：20 个用例钉住两类防护的判据，重点防「两种模式下
+  `A→B→A` 语义相反」这类回归（用例总数 27 → 47）。
+
 ### 修正
 
 - **MCP 技术选型说明改为引用官方依据**：原先写作「课程资料用的是 `MultiServerMCPClient`」，

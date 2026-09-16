@@ -47,6 +47,29 @@ STEP_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# 转移白名单：把「模型随意跳转」约束成状态机
+# ---------------------------------------------------------------------------
+# 当前三个步骤工具把 next 写死在 Command 返回值里，模型无法通过参数跳错步；
+# 这张表的价值在于：若将来改成「模型指定 target」的派发模式（类似 subagents 的
+# single dispatch），可直接用 safe_next_step 校验，业务代码不用改。
+ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    "collect": {"classify", "__end__"},
+    "classify": {"resolve", "collect"},  # 允许回退一次以补充信息
+    "resolve": {"__end__"},
+}
+
+
+def safe_next_step(current: str, target: str, *, violations: int = 0) -> tuple[str, int]:
+    """校验一次步骤转移，非法则留在当前步让模型重新决策。
+
+    Returns:
+        (最终去处, 累计违规次数)；连续违规达上限会转到 ESCALATE 收敛节点。
+    """
+    from agent_kit.guards import guard_transition
+
+    return guard_transition(current, target, ALLOWED_TRANSITIONS, violations=violations)
+
 
 def _apply_step_config(request: ModelRequest) -> ModelRequest:
     """按当前步骤切换提示词与工具——这就是「交接」的落地方式。"""

@@ -96,6 +96,7 @@ flowchart TB
 | [4. 启动](#sec4) | CLI / Web / 会话内命令 |
 | [5. 八种能力模式](#sec5) | chat → router 逐个说明 |
 | [5.1 记忆层](#sec5-1) | Redis 短期 + PostgreSQL 长期 |
+| [5.2 Multi-Agent 防护](#sec5-2) | 跑偏拦截 + 循环拦截 |
 | [6. MCP](#sec6) | 技术选型、叠加用法、为什么必须异步 |
 | [7. 关键认知](#sec7) | 实测踩过的坑 |
 | [7.1 测试与 CI](#sec7-1) | 27 个用例 + GitHub Actions |
@@ -354,6 +355,35 @@ export PG_DSN="postgresql://atlas:atlas@localhost:5432/atlas"
 
 连不上时的排查顺序：`python main.py check --ping` → 看 `[记忆后端连通性]` 一节。
 
+<a id="sec5-2"></a>
+## 5.2 Multi-Agent 防护：跑偏与循环
+
+多智能体一旦上线，最常见的两类事故是**方向跑偏**和**互斥循环**。它们的根因不同，
+防护手段也不同，**不能用同一套机制硬套**：
+
+| | 方向跑偏（off-rail） | 互斥循环（ping-pong） |
+|---|---|---|
+| 本质 | 目标遗忘：多轮后原始任务被挤到上下文很远处 | 转移无收敛性：状态没有单调推进 |
+| 表现 | 模型把「手段」当成「目标」，越跑越远 | A 认为该 B 做、B 认为该 A 做，来回踢皮球 |
+| 对策 | 目标锚定（每步重注入原始目标）+ 预算闸门 | 跳数上限 + 环检测 + 转移白名单 + 单调推进判定 |
+| 落地 | `make_goal_anchor()` / `make_budget_guard()` | `detect_pingpong()` / `guard_transition()` / `route_after_handoff()` |
+
+全部实现在 `agent_kit/guards.py`，可直接 `python main.py guards` 离线看效果：
+一个真实的 LangGraph 里让两个代理互相甩锅，第 3 跳被拦下，收敛节点交出已完成部分与交接路径。
+
+**最容易踩的坑：`A→B→A` 在两种模式下语义完全相反**
+
+- Handoffs：控制权交接，`A→B→A` 是踢皮球，**必须拦**
+- Subagents：主代理调子代理后收回结果，`A→B→A` **完全正常**
+
+所以 `detect_pingpong(path, mode=...)` 必须按模式分别判定——用同一套判据，
+要么误杀正常的回调，要么放过死循环。另外环检测早期写法 `path[-1] == path[-3]`
+会漏判 `A→B→C→A` 四步环，已改为按出现次数判定。
+
+**停止不等于报错**。所有防线的终点都是同一个收敛节点 `escalate`，它输出三件事：
+已完成的部分进展、完整交接路径、下一步建议。只抛异常的话，前面消耗的算力全浪费了，
+读者也无从排查。
+
 <a id="sec6"></a>
 ## 6. 技术决策：MCP 走哪套 API
 
@@ -472,27 +502,31 @@ NotImplementedError: Asynchronous implementation of awrap_tool_call is not avail
 15. MCP 的 stdio 连接绑定在**装配时那个事件循环**上：装配用一次 `asyncio.run()`、执行再用一次，工具调用就报 `Event loop is closed`。CLI 侧改为整个会话共用一个 loop。
 16. 关闭 MCP 要用 `adapter.client.close()`，**不要**用 `__aexit__` —— 它退出的是 anyio 任务组，跨 task 调用会报 `Attempted to exit cancel scope in a different task`。
 17. 参数注入类拦截器不能无脑注入：工具 schema 声明「不接受任何参数」时（如 `current_utc`）注入会让 Pydantic 报 `unexpected_keyword_argument`。本项目按 schema 自动判断，见 `make_arg_injector`。
+18. Multi-Agent 的 `A→B→A` 在 Handoffs（踢皮球）与 Subagents（正常回调）里**语义相反**，环检测必须按模式分开判；判据写成 `path[-1] == path[-3]` 还会漏掉 `A→B→C→A` 四步环。
 
 <a id="sec7-1"></a>
 ## 7.1 测试与 CI
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 27 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 47 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
+python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 ```
 
 测试刻意设计成**零外部依赖**：`tests/conftest.py` 会清掉所有环境变量并切到临时目录，
 因此 GitHub Actions 里不需要起任何服务（见 `.github/workflows/ci.yml`，
-在 Python 3.10 / 3.12 上跑 ruff + pytest，外加 fake 模型的 8 场景冒烟与 7 模式装配）。
+在 Python 3.10 / 3.12 上跑 ruff + pytest，外加 fake 模型的 8 场景冒烟、
+7 模式装配与防护演示）。
 
-三个测试文件各自钉住一类易回归点：
+四个测试文件各自钉住一类易回归点：
 
 | 文件 | 钉住什么 |
 |---|---|
 | `tests/test_tool_hooks.py` | `dual` / `dual_model` 必须同时提供同步与异步钩子（缺一个 MCP 链路就炸） |
 | `tests/test_arg_injector.py` | 零参数工具（如 `current_utc`）不能被注入额外字段 |
 | `tests/test_app_modes.py` | 7 个模式能装配；无 Key 必须明确报错；显式 `fake` 放行 |
+| `tests/test_guards.py` | 跑偏 / 循环两类防护的判据（含两种模式下 `A→B→A` 的相反语义） |
 
 ### 统一异常处理（对标 Spring 的 @ControllerAdvice）
 
