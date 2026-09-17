@@ -147,7 +147,8 @@ langchain-v1.4-demo/
 ├── requirements.txt          ≈ pom.xml 轻量替代
 ├── check_env.py              ≈ 健康检查脚本
 ├── examples/scenarios.py     ≈ 集成示例（不进生产包）
-├── notes/                    ≈ src/main/resources
+├── notes/                    ≈ src/main/resources（含 MCP 规范 / 接入笔记）
+├── skills/                   ≈ 可复用的 Skill 包（mcp-integration）
 ├── runs/                     ≈ 运行时输出
 └── agent_kit/                ≈ com.xxx 业务包
     ├── config.py               ≈ @Configuration（密钥从环境变量读）
@@ -584,6 +585,36 @@ python examples/mcp_servers_demo.py    # 真实拉起 4 个 stdio 子进程并�
 > 此时 `sys.path[0]` 是脚本所在目录、项目根不在其中，`import agent_kit...` 直接失败。
 > 而失败发生在 stdio 握手之前，客户端只会看到 `Connection closed`，极难定位。
 > 所以每个 server 顶部都有一段显式补 `sys.path` 的引导。
+
+<a id="sec6-7"></a>
+### 6.7 MCP 规范笔记与接入流程
+
+`notes/` 下新增两篇笔记（同时作为 Agent 知识库，可被 `search_notes` 检索）：
+
+| 笔记 | 内容 |
+|---|---|
+| `notes/mcp-protocol.md` | 官方规范 `2026-07-28` 版要点：Modern / Legacy 双时代、传输绑定、能力协商、工具报文、两类错误、兼容矩阵 |
+| `notes/mcp-integration.md` | 接入社区 MCP 的实操清单 + 本项目真实踩过的坑 |
+
+**一个必须知道的协议变化**：新版规范（`2026-07-28`）**取消了 `initialize` 握手**，
+改为每个请求在 `_meta` 里自带 `protocolVersion` / `clientInfo` / `clientCapabilities`，
+并新增必实现方法 `server/discover`。旧版（`2025-11-25` 及更早）才走 `initialize`。
+社区 server 目前绝大多数仍是旧版，所以客户端需要具备回退能力。
+版本不匹配的错误码是 `-32022 UnsupportedProtocolVersionError`。
+
+`skills/mcp-integration/` 是把这套流程固化成的 Skill 包，含一个只读审查脚本：
+
+```bash
+python skills/mcp-integration/scripts/audit_server.py agent_kit/mcp_servers
+```
+
+它检查七项：标准库遮蔽、sys.path 引导、工具可测性、路径越界防护、写操作工具、
+stdout 污染、硬编码凭据。自建的四个 server 用它审查是全 PASS；
+故意写坏的样例（模块名 `queue.py`、无越界校验、硬编码 `sk-`、模块级 `print`）
+会被正确判为 FAIL。
+
+> 审查脚本只排静态问题，**不能替代真实连通性验证**
+> （`tools/list` + 逐个 `tools/call` 冒烟）。
 
 <a id="sec7"></a>
 ## 7. 关键认知（实测踩坑）

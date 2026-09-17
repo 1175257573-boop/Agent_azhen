@@ -7,6 +7,19 @@
 
 ### 新增
 
+- **MCP 规范笔记 + 接入流程 Skill**：
+  · `notes/mcp-protocol.md` —— 官方规范 `2026-07-28` 版要点。**重点记录协议变化**：
+    新版取消 `initialize` 握手，改为每请求 `_meta` 携带版本/身份/能力，
+    新增必实现方法 `server/discover`；服务端不再主动发 JSON-RPC 请求，
+    改用 `resultType: "input_required"` + `requestState` 让客户端补齐后重发（id 必须不同）；
+    版本错误码 `-32022`；附官方 7 种 Modern/Legacy 兼容组合矩阵。
+  · `notes/mcp-integration.md` —— 接入社区 MCP 的实操清单与本项目踩坑。
+  · `skills/mcp-integration/` —— 固化成 Skill 包，含只读审查脚本 `audit_server.py`，
+    检查标准库遮蔽 / sys.path 引导 / 工具可测性 / 路径越界 / 写操作 / stdout 污染 /
+    硬编码凭据七项。自建四个 server 审查全 PASS，故意写坏的样例能正确报 FAIL。
+- 新增 `notes/forgetting-curve.md`，补齐知识库在通识类问题上的空白。
+
+
 - **Multi-Agent 防护模块 `agent_kit/guards.py`**：针对两类失控各给一套机制——
   · 方向跑偏（目标遗忘）→ 目标锚定 `make_goal_anchor()`（每步把原始目标重注入
     system prompt）+ 预算闸门 `make_budget_guard()`（步数 / 时间硬上限，超限带着
