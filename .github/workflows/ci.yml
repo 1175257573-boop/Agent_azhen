@@ -37,7 +37,9 @@ jobs:
           pip install "pytest>=8.0" "ruff>=0.6"
 
       - name: 静态检查 (ruff)
-        run: ruff check .
+        # --output-format=github：让每条违规直接变成 PR/运行页上的注解，
+        # 而不是淹没在日志里（日志对公开仓库需要 admin 权限才拿得到）
+        run: ruff check . --output-format=github
 
       - name: 单元测试 (pytest)
         # 刻意不启动 Redis / PostgreSQL、不配置任何 API Key：
