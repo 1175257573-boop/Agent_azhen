@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from agent_kit.app import MODE_HELP, AppConfig, BuiltApp, build_app, build_app_async
-from agent_kit.queue import QueueRegistry
+from agent_kit.message_queue import QueueRegistry
 from agent_kit.streaming import astream_events, stream_events, text_of_message
 
 # 缓存键：(mode, provider, user_id, role, enable_mcp)

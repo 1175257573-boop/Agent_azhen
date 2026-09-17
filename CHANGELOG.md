@@ -43,7 +43,7 @@
   路径越界防护、密钥输出打码、不泄漏本机绝对路径。
 
 - **排队消息（queued messages）**：Agent 忙碌时用户的输入先入队，本轮结束后由服务端
-  自动按先进先出执行，行为对齐 WorkBuddy。核心在 `agent_kit/queue.py`：
+  自动按先进先出执行，行为对齐 WorkBuddy。核心在 `agent_kit/message_queue.py`：
   · 用 `deque + asyncio.Event` 而不是 `asyncio.Queue`——后者拿不到「待发列表」，
     而前端要展示「待发送 N 条」并支持撤回/编辑；
   · 按 `thread_id` 隔离，上限 20 条（超出 429，不让 Agent 一轮后连续自言自语）；

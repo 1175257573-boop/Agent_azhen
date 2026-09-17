@@ -146,7 +146,9 @@ def test_project_checklist_complete():
 
 def test_project_tree_hides_noise():
     tree = doc_audit.project_tree(depth=2)
-    assert tree["tree"].startswith("langchain-v1.4-demo/")
+    # 目录名必须动态取：CI 里 checkout 出来的目录是仓库名，不是本机的项目目录名。
+    # 硬编码目录名的测试在 CI 上必挂——这是「测试依赖本机环境」的典型形态。
+    assert tree["tree"].startswith(f"{PROJECT_ROOT.name}/")
     assert "agent_kit/" in tree["tree"]
     # 噪音目录与隐藏文件都不该出现，否则模型收到的结构图会失真
     assert ".venv" not in tree["tree"]

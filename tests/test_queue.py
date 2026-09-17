@@ -1,4 +1,4 @@
-"""钉住排队消息（agent_kit/queue.py）与服务层 drain 的行为。
+"""钉住排队消息（agent_kit/message_queue.py）与服务层 drain 的行为。
 
 排队这个功能有三类回归最容易发生，都在这里钉住：
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_kit.queue import (
+from agent_kit.message_queue import (
     MAX_QUEUED,
     MessageQueue,
     QueueFullError,
@@ -143,7 +143,7 @@ class _FakeService:
     """
 
     def __init__(self, interrupted_at: int | None = None) -> None:
-        from agent_kit.queue import QueueRegistry
+        from agent_kit.message_queue import QueueRegistry
 
         self._queues = QueueRegistry()
         self.sent: list[str] = []

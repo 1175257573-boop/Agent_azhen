@@ -425,7 +425,7 @@ python main.py chat --mode skills      # 交互使用
 
 一轮 Agent 要跑几十秒，这期间用户输入的第二条、第三条指令怎么办？两个错误答案：
 直接丢弃（用户得重打一遍）、立刻并发发给 Agent（打断当前这轮的上下文）。
-本项目采用与 WorkBuddy 一致的**排队**方案：`agent_kit/queue.py`。
+本项目采用与 WorkBuddy 一致的**排队**方案：`agent_kit/message_queue.py`。
 
 ```
 用户在 Agent 忙碌时输入  →  入队（服务端为真相源，按 thread_id 隔离）
@@ -608,6 +608,7 @@ python examples/mcp_servers_demo.py    # 真实拉起 4 个 stdio 子进程并�
 18. Multi-Agent 的 `A→B→A` 在 Handoffs（踢皮球）与 Subagents（正常回调）里**语义相反**，环检测必须按模式分开判；判据写成 `path[-1] == path[-3]` 还会漏掉 `A→B→C→A` 四步环。
 19. MCP Server 被客户端**当脚本启动**（`python .../server.py`），项目根不在 `sys.path` 里，`import agent_kit...` 直接失败；失败发生在握手之前，客户端只报 `Connection closed`。每个 server 顶部都要显式补 `sys.path`。
 20. `@mcp.tool` 会把函数包成 `FunctionTool`，原函数就调不到了 —— 想写单元测试，必须「先写普通函数、最后 `mcp.tool(fn)` 统一注册」。
+21. **模块名不能和标准库重名**：本项目曾把排队模块命名为 `agent_kit/queue.py`，结果 MCP Server 以脚本方式启动（`python agent_kit/mcp_server.py`）时 `sys.path[0]` 是 `agent_kit/`，`import queue` 导入的是**我们的模块**而不是标准库 → anyio 报 `cannot import name 'Queue' from 'queue'` → 后端 `asyncio` 加载失败 → 客户端只看到 `Connection closed`。已改名为 `agent_kit/message_queue.py`。**排查线索**：报错信息里出现你自己项目的路径，就是被遮蔽了。
 
 <a id="sec7-1"></a>
 ## 7.1 测试与 CI
