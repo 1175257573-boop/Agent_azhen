@@ -133,6 +133,14 @@ def cmd_guards(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rag(_: argparse.Namespace) -> int:
+    """语义检索演示：字面匹配 vs 语义检索的对照（离线，零 API Key）。"""
+    from examples.rag_demo import main as rag_main
+
+    rag_main()
+    return 0
+
+
 def cmd_info(_: argparse.Namespace) -> int:
     from agent_kit.app import MODE_HELP
     from agent_kit.config import DEFAULT_MODELS, AgentSettings, detect_provider, get_env_key_name
@@ -231,6 +239,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_guards = sub.add_parser("guards", parents=[common], help="Multi-Agent 防护演示（跑偏 / 循环拦截，离线）")
     p_guards.set_defaults(func=cmd_guards)
+
+    p_rag = sub.add_parser("rag", parents=[common], help="语义检索演示（字面匹配 vs 语义检索，离线）")
+    p_rag.set_defaults(func=cmd_rag)
 
     p_info = sub.add_parser("info", parents=[common], help="打印运行环境概况")
     p_info.set_defaults(func=cmd_info)

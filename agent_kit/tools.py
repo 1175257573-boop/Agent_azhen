@@ -155,6 +155,89 @@ def list_notes() -> str:
 
 
 # ---------------------------------------------------------------------------
+# 2.5) 语义检索（RAG）：与上面的字面检索形成对比
+# ---------------------------------------------------------------------------
+_INDEX_CACHE: dict[str, object] = {}
+
+
+def _get_index() -> tuple[object, object]:
+    """惰性建索引并缓存。
+
+    返回 (index, choice)。降级状态一并返回——调用方要能告诉用户
+    「你现在用的是离线向量，效果会差一些」，而不是默默给出结果。
+    """
+    from agent_kit.retrieval import build_index, get_embedder, load_docs
+
+    cached = _INDEX_CACHE.get("index")
+    if cached is not None:
+        return cached, _INDEX_CACHE["choice"]
+
+    choice = get_embedder()
+    index = build_index(load_docs(NOTES_DIR), choice.embedder)
+    _INDEX_CACHE["index"] = index
+    _INDEX_CACHE["choice"] = choice
+    return index, choice
+
+
+@tool
+def search_knowledge(query: str, top_k: int = 3) -> str:
+    """在本地笔记库中做**语义检索**：说法不同但意思相近时也能命中。
+
+    与 search_notes（字面关键词匹配）的区别：
+    问「怎么复习才记得住」这种问法，字面检索搜不到标题叫「遗忘曲线」的笔记，
+    而语义检索可以。不确定该用哪个时，先用这个。
+
+    Args:
+        query: 自然语言问题或关键词
+        top_k: 返回条数上限
+    """
+    try:
+        index, choice = _get_index()
+        if len(index) == 0:
+            return "笔记库为空，无法检索。"
+
+        # 查询向量必须走与建库相同的后端，否则维度对不上
+        qv = choice.embedder.embed([query])[0]
+        hits = index.search(qv, top_k=top_k)
+        if not hits:
+            return f"笔记库中没有与「{query}」语义相关的内容。"
+
+        lines = []
+        for h in hits:
+            # 正则里的反斜杠不能写进 f-string 表达式：
+            # Python 3.10 不允许，本地 3.12 能跑而 CI 的 3.10 会直接 SyntaxError。
+            snippet = re.sub(r"\s+", " ", h.text)[:220]
+            lines.append(f"[相似度 {h.score:.3f}] {h.doc_id}\n{snippet}...")
+        head = ""
+        if choice.degraded:
+            head = f"（当前为离线向量降级模式：{choice.reason}，语义相似度仅供参考）\n\n"
+        return head + "\n\n---\n\n".join(lines)
+    except Exception as exc:
+        raise ToolException(f"语义检索失败：{exc}") from exc
+
+
+@tool
+def rebuild_knowledge_index(backend: str = "auto") -> str:
+    """重建语义检索索引。笔记内容有变动后调用它，否则检索用的还是旧索引。
+
+    Args:
+        backend: auto（有 Key 用真实向量）/ dashscope / hashing
+    """
+    from agent_kit.retrieval import build_index, get_embedder, load_docs
+
+    try:
+        choice = get_embedder(backend)
+        index = build_index(load_docs(NOTES_DIR), choice.embedder)
+        _INDEX_CACHE.clear()
+        _INDEX_CACHE["index"] = index
+        _INDEX_CACHE["choice"] = choice
+        note = f"（降级：{choice.reason}）" if choice.degraded else ""
+        return f"索引已重建：{len(index)} 个片段，后端 {choice.backend}。{note}"
+    except Exception as exc:
+        raise ToolException(f"重建索引失败：{exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # 3) 需要运行时信息的工具：长期记忆读写（依赖 ToolRuntime）
 # ---------------------------------------------------------------------------
 @tool
@@ -251,6 +334,8 @@ SAFE_TOOLS = [
     calculator,
     get_current_time,
     search_notes,
+    search_knowledge,
+    rebuild_knowledge_index,
     list_notes,
     remember_preference,
     recall_preferences,

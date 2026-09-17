@@ -160,6 +160,7 @@ langchain-v1.4-demo/
     ├── middleware.py           ≈ Interceptor / Filter / AOP
     ├── memory.py               ≈ Mapper / Repository
     ├── models.py               ≈ 模型路由策略
+    ├── retrieval.py            ≈ 检索（切分 / 向量化 / 索引 / 语义检索）
     ├── dynamic_tools.py        ≈ 运行时工具可见性
     ├── streaming.py            ≈ 流式输出封装
     ├── mcp_client.py           ≈ MCP 客户端 + 拦截器
@@ -616,6 +617,39 @@ stdout 污染、硬编码凭据。自建的四个 server 用它审查是全 PASS
 > 审查脚本只排静态问题，**不能替代真实连通性验证**
 > （`tools/list` + 逐个 `tools/call` 冒烟）。
 
+<a id="sec6-8"></a>
+### 6.8 检索（RAG）：字面匹配不够用，以及为什么要能降级
+
+`search_notes` 是字面关键词匹配，问题很直接：问「怎么复习才记得住」，
+而笔记里写的是「遗忘曲线」「间隔重复」——一个字都不重叠，必然搜不到。
+
+`agent_kit/retrieval.py` 补上语义检索这条路：切分 → 向量化 → 索引 → 余弦检索。
+
+```bash
+python main.py rag        # 对照演示：同一个问题，两种检索的结果差异
+```
+
+**三个设计决定**
+
+1. **向量库用 numpy，不引 FAISS / Chroma** —— 笔记库只有几十篇，线性扫描耗时可忽略，
+   却省掉一个在 Windows 上经常装不上的重依赖。
+2. **embedding 必须能降级** —— `DashScopeEmbedder`（真实语义向量，需 Key）
+   不可用时自动降到 `HashingEmbedder`（零依赖离线实现）。
+   降级是**显式**的：`get_embedder()` 返回 `degraded` 与 `reason`，
+   工具输出里会写明「当前为离线向量降级模式」，而不是悄悄给个质量差很多的结果。
+3. **中文用 bigram 补词序** —— 纯 unigram 下「遗忘曲线」和「曲线遗忘」完全一样，
+   加上相邻二字组才能区分。
+
+**踩到的坑**
+
+- **有符号哈希会抵消归零**：初版把带符号的值累加后再取 `log`，
+  两个符号相反的碰撞词抵消成 0 → `log(0) = -inf` → 整条向量变 NaN。
+  改成词频（无符号）单独统计、符号只由哈希决定后解决。
+- **f-string 里不能有反斜杠**：`f"{re.sub(r'\s+', ...)}"` 在 Python 3.10 是语法错误
+  （3.12 才允许），本地 3.12 能跑而 CI 的 3.10 会直接 SyntaxError——
+  这是本项目第四次「本地绿、CI 红」。
+- **哈希必须用 `hashlib`**：内置 `hash()` 对字符串有进程级随机化，换进程索引就全废。
+
 <a id="sec7"></a>
 ## 7. 关键认知（实测踩坑）
 
@@ -646,9 +680,10 @@ stdout 污染、硬编码凭据。自建的四个 server 用它审查是全 PASS
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 91 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 114 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
 python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
+python main.py rag            # 检索演示：字面匹配 vs 语义检索（离线）
 ```
 
 测试刻意设计成**零外部依赖**：`tests/conftest.py` 会清掉所有环境变量并切到临时目录，

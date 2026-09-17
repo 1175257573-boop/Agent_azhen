@@ -7,6 +7,17 @@
 
 ### 新增
 
+- **检索（RAG）模块 `agent_kit/retrieval.py`**：切分 → 向量化 → 索引 → 余弦检索，
+  补上此前只有字面关键词匹配的短板（问「怎么复习才记得住」搜不到标题叫
+  「遗忘曲线」的笔记）。新增工具 `search_knowledge` / `rebuild_knowledge_index`，
+  CLI 子命令 `python main.py rag`。
+  · **向量库用 numpy 而非 FAISS**：语料只有几十篇，线性扫描足够，省掉 Windows 上的重依赖；
+  · **embedding 可降级**：`DashScopeEmbedder`（真实向量，需 Key）不可用时自动降到
+    `HashingEmbedder`（零依赖离线），降级显式返回 `degraded` + `reason`，不静默降质；
+  · 中文切字后补 bigram，否则「遗忘曲线」与「曲线遗忘」在 unigram 下完全相同。
+- `tests/test_retrieval.py`：23 个用例，含一条「字面检索落空 / 语义检索命中」的对照用例
+  （用例总数 91 → 114）。
+
 - **MCP 规范笔记 + 接入流程 Skill**：
   · `notes/mcp-protocol.md` —— 官方规范 `2026-07-28` 版要点。**重点记录协议变化**：
     新版取消 `initialize` 握手，改为每请求 `_meta` 携带版本/身份/能力，

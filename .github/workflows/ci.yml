@@ -73,6 +73,9 @@ jobs:
       - name: Multi-Agent 防护演示（跑偏 / 循环拦截）
         run: python main.py guards
 
+      - name: 语义检索演示（字面匹配 vs 语义检索，离线降级路径）
+        run: python main.py rag
+
       - name: MCP Server 协议连通（4 个 server / 21 个工具）
         run: python examples/mcp_servers_demo.py
 
