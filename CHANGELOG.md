@@ -121,6 +121,14 @@
 
 ### 修复
 
+- **CI 静态检查钉住 ruff 版本**：`ruff>=0.6` 改成 `ruff>=0.16,<0.17`（CI 与 `pyproject.toml`
+  的 dev extras 同步）。不同 ruff 版本的默认规则集不同——实测 `0.6.9` 会在
+  `server/app.py` 等 5 个既有文件上多报 12 条 `E402`，松散约束会让 CI 结果随上游发布而变。
+- **审查脚本补可执行位**：`skills/mcp-integration/scripts/audit_server.py` 带 shebang
+  但 git mode 是 `100644`，Linux 上触发 `EXE001`。**Windows 没有 POSIX 权限位，本地 ruff
+  判不出来，只有 CI 会暴露** → `git update-index --chmod=+x`。
+- CI 的 ruff 步骤改用 `--output-format=github`：违规直接落成注解。
+  公开仓库的 job logs 需要 admin 权限（403），注解则是公开可读的，排查时能省很多事。
 - MCP 工具同步调用报 `NotImplementedError` → 全链路改异步
 - 自定义钩子只有 sync 版导致 `awrap_tool_call is not available` → 新增 `tool_hooks.py` 双模封装
 - 零参数工具被注入参数触发 `unexpected_keyword_argument` → 按 JSON Schema 判断是否注入

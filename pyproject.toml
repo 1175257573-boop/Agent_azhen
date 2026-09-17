@@ -26,7 +26,9 @@ redis = ["langgraph-checkpoint-redis>=0.5.0", "redis>=6.0"]
 postgres = ["langgraph-checkpoint-postgres>=3.0.0", "psycopg[binary]>=3.2"]
 # 不想起外部服务时用 sqlite 落盘（代码里已内置该分支）
 sqlite = ["langgraph-checkpoint-sqlite>=2.0.0"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# ruff 钉住次版本：不同版本的默认规则集不一样（0.6.x 会在既有文件上多报 12 条 E402），
+# 松散约束会让 CI 结果随上游发布而变
+dev = ["pytest>=8.0", "ruff>=0.16,<0.17"]
 # Web 模式：FastAPI + 前端页面
 web = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "python-dotenv>=1.0"]
 
