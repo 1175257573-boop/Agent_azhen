@@ -7,6 +7,17 @@
 
 ### 新增
 
+- **Agent 效果评估 `agent_kit/evalset.py` + CLI `main.py eval`**：补上「单元测试证明不了
+  Agent 干得好」的缺口。评估工具选择准确率、关键词命中率与用例通过率，
+  支持 `--save` / `--compare` 做回归对比（通过率下降返回非零）。
+  · **离线自检**（默认，进 CI）：用 `ScriptedChatModel` 编排确定性用例，
+    其中**故意放两条必然失败的**，用来证明评估器会判失败；
+  · **真机评估**（`--real`）：真实模型 + 人工标注用例，产出真实指标。
+  · 坑：没配 Key 时 provider 会退化成 fake，`--real` 会静默产出假报告
+    → 显式检查 provider 并 fail fast，提示该配哪个环境变量。
+- `tests/test_evalset.py`：16 个用例（总数 114 → 130），含一条
+  「自检集必须同时含通过与失败用例」的反向验证。
+
 - **检索（RAG）模块 `agent_kit/retrieval.py`**：切分 → 向量化 → 索引 → 余弦检索，
   补上此前只有字面关键词匹配的短板（问「怎么复习才记得住」搜不到标题叫
   「遗忘曲线」的笔记）。新增工具 `search_knowledge` / `rebuild_knowledge_index`，

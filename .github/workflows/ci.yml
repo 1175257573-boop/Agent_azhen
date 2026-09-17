@@ -73,6 +73,10 @@ jobs:
       - name: Multi-Agent 防护演示（跑偏 / 循环拦截）
         run: python main.py guards
 
+      # 只跑离线自检：验证「评估器判得准」，不调用真实模型
+      - name: Agent 效果评估（离线自检，含故意失败用例）
+        run: python main.py eval --show-all
+
       - name: 语义检索演示（字面匹配 vs 语义检索，离线降级路径）
         run: python main.py rag
 

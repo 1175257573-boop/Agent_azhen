@@ -650,6 +650,37 @@ python main.py rag        # 对照演示：同一个问题，两种检索的结�
   这是本项目第四次「本地绿、CI 红」。
 - **哈希必须用 `hashlib`**：内置 `hash()` 对字符串有进程级随机化，换进程索引就全废。
 
+<a id="sec6-9"></a>
+### 6.9 效果评估：单元测试证明不了 Agent 干得好
+
+单测只能证明「代码没崩」。改一版提示词、换一个模型、加一个工具之后，
+效果到底是变好还是变差了？没有评估集就只能凭感觉。
+
+```bash
+python main.py eval            # 离线自检：验证评估器本身判得准（进 CI，零 Key）
+python main.py eval --real     # 真机评估：真实模型，产出真实指标（需要 API Key）
+python main.py eval --real --save eval/baseline.json    # 存基线
+python main.py eval --real --compare eval/baseline.json # 回归对比，下降则返回非零
+```
+
+**评估什么**：工具选择准确率（该调的工具调了没有——Agent 最容易错的一步）、
+关键词命中率（最终回答里有没有该有的信息）、用例通过率。
+刻意不给「智能程度」打分：那是主观的，没有对照组就没意义。
+
+**两条路径的分工**
+
+| 路径 | 跑什么 | 数字能不能信 |
+|---|---|---|
+| 离线自检 | `ScriptedChatModel` 编排的确定性用例 | **不能**——指标数字无意义，价值在于证明评估器会判失败 |
+| 真机评估 | 真实模型 + 人工标注的用例 | 能，这才是评估的真正用途 |
+
+离线自检集里**故意放了两条必然失败的用例**（调错工具、关键词不命中）。
+如果哪天它变成全通过，说明评估器已经不会判错了——有一条测试专门钉这件事。
+
+**踩的坑**：没配 Key 时 provider 会退化成 `fake`，`--real` 会静默跑出一份
+「看着正常、实际测的是编排模型」的假报告。所以在 `run_real()` 里显式检查
+provider 并 fail fast，给出该配哪个环境变量的提示。
+
 <a id="sec7"></a>
 ## 7. 关键认知（实测踩坑）
 
@@ -680,10 +711,12 @@ python main.py rag        # 对照演示：同一个问题，两种检索的结�
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 114 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 130 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
 python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 python main.py rag            # 检索演示：字面匹配 vs 语义检索（离线）
+python main.py eval           # 效果评估：离线自检（验证评估器判得准）
+python main.py eval --real    # 效果评估：真机调用，产出真实指标（需 Key）
 ```
 
 测试刻意设计成**零外部依赖**：`tests/conftest.py` 会清掉所有环境变量并切到临时目录，

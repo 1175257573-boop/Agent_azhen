@@ -141,6 +141,24 @@ def cmd_rag(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Agent 效果评估：离线自检（默认）或真机评估（--real）。"""
+    from examples.eval_demo import main as eval_main
+
+    argv = []
+    if getattr(args, "real", False):
+        argv.append("--real")
+    if getattr(args, "json", False):
+        argv.append("--json")
+    if getattr(args, "show_all", False):
+        argv.append("--show-all")
+    if getattr(args, "save", None):
+        argv += ["--save", args.save]
+    if getattr(args, "compare", None):
+        argv += ["--compare", args.compare]
+    return eval_main(argv)
+
+
 def cmd_info(_: argparse.Namespace) -> int:
     from agent_kit.app import MODE_HELP
     from agent_kit.config import DEFAULT_MODELS, AgentSettings, detect_provider, get_env_key_name
@@ -242,6 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rag = sub.add_parser("rag", parents=[common], help="语义检索演示（字面匹配 vs 语义检索，离线）")
     p_rag.set_defaults(func=cmd_rag)
+
+    p_eval = sub.add_parser("eval", parents=[common], help="Agent 效果评估（离线自检 / --real 真机）")
+    p_eval.add_argument("--real", action="store_true", help="真机评估：调用真实模型，需要 API Key")
+    p_eval.add_argument("--json", action="store_true", help="输出 JSON")
+    p_eval.add_argument("--show-all", action="store_true", help="列出全部用例而非仅失败项")
+    p_eval.add_argument("--save", metavar="PATH", help="把结果存为基线 JSON")
+    p_eval.add_argument("--compare", metavar="PATH", help="与基线对比，通过率下降则返回非零")
+    p_eval.set_defaults(func=cmd_eval)
 
     p_info = sub.add_parser("info", parents=[common], help="打印运行环境概况")
     p_info.set_defaults(func=cmd_info)
