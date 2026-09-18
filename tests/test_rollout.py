@@ -22,12 +22,12 @@ class _FakeGraph:
     def __init__(self, messages):
         self._messages = messages
 
-    def get_state(self, config):  # noqa: ARG002 - 签名要对齐 LangGraph
+    def get_state(self, config):
         return _FakeState(self._messages)
 
 
 class _BrokenGraph:
-    def get_state(self, config):  # noqa: ARG002
+    def get_state(self, config):
         raise RuntimeError("这个图没有 checkpointer")
 
 
