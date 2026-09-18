@@ -144,3 +144,83 @@ def test_code_fence_is_stripped():
     fenced = "```markdown\n# MEMORY\n\n- 一条记忆\n```"
     assert memories._strip_code_fence(fenced) == "# MEMORY\n\n- 一条记忆"
     assert memories._strip_code_fence("# 没有围栏") == "# 没有围栏"
+
+
+class _LengthLimited(_FakeModel):
+    """复刻实测到的 qwen-plus 行为：结构化调用抛 LengthFinishReasonError。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plain_calls = 0
+
+    def with_structured_output(self, schema):
+        class _Extract:
+            def invoke(self_inner, prompt: str) -> MemoryExtract:
+                raise _make_length_error()
+
+        return _Extract()
+
+    def invoke(self, prompt: str):
+        self.plain_calls += 1
+        return SimpleNamespace(content="- raw_memory：用户偏好讲原理\n- rollout_summary：问了偏好\n")
+
+
+def _make_length_error() -> Exception:
+    """造一个类名与 langchain 一致的异常（不能在这里 import langchain 的私有类）。"""
+    exc_class = type("LengthFinishReasonError", (Exception,), {})
+    return exc_class("Could not parse response content as the length limit was reached")
+
+
+def test_structured_failure_falls_back_to_plain_call(tmp_path):
+    """实测结论：qwen-plus 结构化输出会偶发跑飞，必须能降级到裸调用。"""
+    from agent_kit import rollout as rollout_mod
+
+    db = tmp_path / "mem.db"
+    rollout_db = tmp_path / "rollout.db"
+    rollout_mod.append("t1", [SimpleNamespace(type="human", content="你好", name=None)], db_path=rollout_db)
+
+    model = _LengthLimited()
+    report = memories.run_phase1(model=model, db_path=db, rollout_db=rollout_db)
+    assert report.succeeded == ["t1"], report.to_text()
+    assert model.plain_calls == 1          # 确实走了降级
+    stored = memories.all_records(db_path=db)[0]
+    assert "讲原理" in stored.raw_memory
+
+
+def test_auth_errors_are_not_swallowed_by_the_fallback():
+    """降级只救解析类错误；鉴权失败必须照原样抛出去。"""
+    class _AuthError(Exception):
+        pass
+
+    class _Model(_FakeModel):
+        def with_structured_output(self, schema):
+            class _Extract:
+                def invoke(self_inner, prompt: str) -> MemoryExtract:
+                    raise _AuthError("401 invalid api key")
+
+            return _Extract()
+
+    assert memories._is_parse_failure(_AuthError("x")) is False
+    extractor = memories._structured(_Model())
+    try:
+        extractor.invoke("prompt")
+    except _AuthError:
+        return
+    raise AssertionError("鉴权错误不该被降级吃掉")
+
+
+def test_markdown_fields_are_parsed():
+    text = "- raw_memory：偏好原理\n- rollout_summary：问了偏好\n- rollout_slug：pref"
+    got = memories._parse_markdown_fields(text)
+    assert got is not None
+    assert got.raw_memory == "偏好原理"
+    assert got.rollout_summary == "问了偏好"
+    assert got.rollout_slug == "pref"
+
+
+def test_unlabeled_reply_becomes_raw_memory():
+    """模型不按格式来时不许丢内容，整段当 raw_memory 收下。"""
+    got = memories._parse_markdown_fields("随便写了一段没有标签的话")
+    assert got is not None
+    assert got.raw_memory == "随便写了一段没有标签的话"
+    assert memories._parse_markdown_fields("   ") is None

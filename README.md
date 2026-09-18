@@ -491,6 +491,21 @@ python main.py memories --background --wait 30  # 最多等 30 秒看结果
 另外加了一种 Codex 有、我们原先没有的结局：**本次会话没有可记忆内容**
 （Codex 叫 `succeeded_no_output`）——跑完了但确实没东西好记，如实跳过，**不拿模板补一条**。
 
+#### 一个只有真机跑才暴露的坑：结构化输出会跑飞
+
+前半程用假模型测全是绿的，换成真实 qwen-plus 后三条会话挂了两条。查下来是这样：
+
+| 调用方式 | 实测（同一份输入） |
+|---|---|
+| `with_structured_output` | 三次里两次抛 `LengthFinishReasonError`，跑到 token 上限还没生成完 |
+| 裸 `invoke` | 稳定返回，53 tokens 就停 |
+| 结构化 + `max_tokens` 提到 4096 | **照样跑满 4096** |
+
+所以既不是并发也不是配额 —— 是 function-calling 模式下偶发跑飞。现在的做法是
+**结构化优先、解析失败降级到裸调用 + 手工解析**（`_parse_markdown_fields()`）：
+降级只对 `LengthFinishReason` / `OutputParser` / `Validation` 三类解析错误生效，
+鉴权失败、网络错误一律原样抛出，不能被降级悄悄吃掉变成「看起来成功其实是空记忆」。
+
 ### 起服务
 
 推荐直接用容器，`docker-compose.yml` 里已经配好了两个服务：

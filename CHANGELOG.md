@@ -98,7 +98,26 @@
   模型说「本次无可记忆内容」时如实跳过，**不拿模板补一条**，也不算失败进退避。
 - `memories` 命令新增 `--background` / `--wait` / `--no-bg-phase2`；CI 冒烟加了这条路径
   （在 Linux 上验证「没 Key 时应明确跳过而不是报错或编造」）。
-- 测试 183 → **200**（`test_memory_jobs.py` 17）。
+- 测试 183 → **204**（`test_memory_jobs.py` 17 + `test_memories.py` 4，后者是降级路径）。
+
+### 修复（真实模型实测发现，`memories._structured` 加降级）
+
+用真实 qwen-plus 跑通整条管线后才暴露的问题，单测是发现不了的：
+
+| 调用方式 | 实测结果（同一份输入） |
+|---|---|
+| `with_structured_output`（原做法） | 三次里两次抛 `LengthFinishReasonError`，跑到 token 上限仍没生成完 |
+| 裸 `invoke` | 稳定返回，53 tokens 就停 |
+| 结构化 + `max_tokens` 提到 4096 | **照样把 4096 跑满** → 不是配额不够，是 function-calling 模式下偶发跑飞 |
+
+所以 `_structured()` 改为「结构化优先、解析失败降级到裸调用 + 手工解析」，
+并补 `_parse_markdown_fields()` 从 `- raw_memory：xxx` 里抠字段。
+**降级只对解析类错误生效**（`LengthFinishReason` / `OutputParser` / `Validation`）——
+鉴权失败、网络错误一律原样抛出，不许被降级悄悄吃掉变成「看起来成功其实是空记忆」。
+
+其余真机验证结论：Phase 1 抽取 → 脱敏 → 存库 → 台账 → Phase 2 合并 → git 基线提交
+整条链路在真模型下跑通；故意写进会话的假 Key 落库后是 `[REDACTED_SK]`；
+sub-agent 会话被正确排除；重复运行时 Phase 1 按内容指纹跳过、Phase 2 按 git diff 跳过。
 
 ### 新增
 

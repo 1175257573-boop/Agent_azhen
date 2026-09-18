@@ -619,21 +619,78 @@ def _default_model() -> Any:
 
 
 def _structured(model: Any) -> Any:
-    """尽量走结构化输出；模型不支持时退回普通调用 + 手工解析。"""
-    try:
-        return model.with_structured_output(MemoryExtract)
-    except Exception:  # noqa: BLE001 - 不是所有模型都支持
-        class _Fallback:
-            def invoke(self_inner, prompt: str):
-                text = model.invoke(prompt)
-                content = getattr(text, "content", str(text))
-                return MemoryExtract(
-                    raw_memory=content,
-                    rollout_summary=content[:120],
-                    rollout_slug=None,
-                )
+    """尽量走结构化输出；拿不到结果时退回普通调用 + 手工解析。
 
-        return _Fallback()
+    为什么要有降级路径（实测 qwen-plus，同一份输入跑了若干次）：
+
+    | 调用方式 | 结果 |
+    |---|---|
+    | `with_structured_output` | 三次里两次抛 `LengthFinishReasonError`（跑到 token 上限还没生成完） |
+    | 裸 `invoke` | 稳定返回，53 tokens 就停 |
+
+    而且把 `max_tokens` 从 2048 提到 4096 **没用**——它照样能把 4096 跑满。
+    也就是说这是 function-calling 模式下偶发的「跑飞」，不是配额不够。
+    裸调用在同样输入下始终正常，所以降级是有效且必要的。
+
+    降级只对**解析类错误**生效：鉴权失败、网络错误这类必须照原样抛出去，
+    被降级悄悄吃掉就会变成「看起来成功了但其实是空记忆」。
+    """
+    try:
+        primary = model.with_structured_output(MemoryExtract)
+    except Exception:  # noqa: BLE001 - 不是所有模型都支持结构化输出
+        primary = None
+
+    class _Adapter:
+        """把「结构化优先、失败降级」包成一个稳定的 invoke。"""
+
+        def invoke(self_inner, prompt: str) -> MemoryExtract | None:
+            if primary is not None:
+                try:
+                    return primary.invoke(prompt)
+                except Exception as exc:
+                    if not _is_parse_failure(exc):
+                        raise
+                    log.warning("结构化抽取失败（%s），降级为普通调用再试一次", type(exc).__name__)
+            reply = model.invoke(prompt)
+            return _parse_markdown_fields(getattr(reply, "content", str(reply)))
+
+    return _Adapter()
+
+
+# 只有这三类算「模型给的东西没法用」，可以换条路重试。
+# 其余（鉴权失败、超时、 quota 不足……）一律原样抛出，不许静默吞掉。
+_PARSE_FAILURE_TAGS = ("LengthFinishReason", "OutputParser", "Validation")
+
+
+def _is_parse_failure(exc: Exception) -> bool:
+    name = type(exc).__name__
+    return any(tag in name for tag in _PARSE_FAILURE_TAGS)
+
+
+def _parse_markdown_fields(text: str) -> MemoryExtract | None:
+    """从「- raw_memory：xxx」这种答复里把字段抠出来（降级路径专用）。
+
+    模型不保证给全字段；一个字段都没有就返回 None（交给上层当跳过处理，不编造）。
+    """
+    if not text or not text.strip():
+        return None
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("-*•").strip()
+        for field_name in ("raw_memory", "rollout_summary", "rollout_slug"):
+            if not stripped.startswith(field_name):
+                continue
+            value = stripped[len(field_name):].lstrip("：:").strip()
+            if value:
+                found.setdefault(field_name, value)
+    if not found:
+        # 连一个标签都没有：可能是模型直接写了一段话，整段当作 raw_memory
+        return MemoryExtract(raw_memory=text.strip(), rollout_summary=text.strip()[:120], rollout_slug=None)
+    return MemoryExtract(
+        raw_memory=found.get("raw_memory", ""),
+        rollout_summary=found.get("rollout_summary", "") or (found.get("raw_memory", "")[:120]),
+        rollout_slug=found.get("rollout_slug"),
+    )
 
 
 # ---------------------------------------------------------------------------
