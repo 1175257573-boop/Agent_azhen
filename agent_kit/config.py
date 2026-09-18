@@ -143,7 +143,9 @@ class AgentSettings:
             raise ValueError(f"未知 provider：{self.provider}，可选 {list(DEFAULT_MODELS)}")
         if not self.model_name:
             self.model_name = (
-                os.getenv("LLM_MODEL") or load_atlas_config().model or DEFAULT_MODELS[self.provider]
+                os.getenv("LLM_MODEL")
+                or load_atlas_config().model_name
+                or DEFAULT_MODELS[self.provider]
             )
 
     @property
@@ -242,7 +244,7 @@ def detect_provider() -> str:
 # 环境变量仍然最高，保证已有用法不被破坏。
 #
 # 示例 atlas.toml：
-#     model = "qwen-plus"
+#     model_name = "qwen-plus"
 #     model_provider = "dashscope"
 #     [memory]
 #     short_term = "sqlite"
@@ -328,7 +330,9 @@ class AtlasConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    model: str | None = None
+    # 字段名叫 model_name 而不是 model：pydantic 的 BaseModel 保留了 model_* 前缀
+    # （model_dump / model_validate / model_config...），字段名用 model 会被遮蔽。
+    model_name: str | None = None
     model_provider: str | None = None
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)

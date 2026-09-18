@@ -261,18 +261,18 @@ REAL_CASES: tuple[EvalCase, ...] = (
         "notes-1", "笔记库里都有哪些主题？", ("list_notes",), ("笔记",), "列目录类问题"
     ),
     EvalCase(
-        "rag-1",
-        "怎么复习才记得住？",
-        ("search_knowledge",),
-        ("复习",),
-        "语义检索的核心场景：问法与笔记标题不重叠",
+        "notes-2",
+        "笔记里怎么讲 MCP 服务的接入流程？",
+        ("search_notes",),
+        ("接入",),
+        "字面检索：问题里的关键词要能在笔记正文中命中",
     ),
     EvalCase(
-        "rag-2",
+        "notes-3",
         "接入别人的 MCP 服务之前要先检查什么？",
-        ("search_knowledge",),
+        ("search_notes",),
         ("越界",),
-        "语义检索：应命中 mcp-integration 笔记",
+        "检索 + 归纳：应命中 mcp-integration 笔记并答到路径越界",
     ),
     EvalCase(
         "mcp-1", "这个项目有哪些 MCP 工具可用？", (), ("MCP",), "不考核具体工具，只看是否答到点上"
@@ -288,8 +288,8 @@ SELFTEST_CASES: tuple[ScriptedCase, ...] = (
         scripted_answer="当前时间是 12:00。",
     ),
     ScriptedCase(
-        EvalCase("ok-rag", "怎么复习？", ("search_knowledge",), ("复习", "间隔")),
-        scripted_tools=("search_knowledge",),
+        EvalCase("ok-notes", "怎么复习？", ("search_notes",), ("复习", "间隔")),
+        scripted_tools=("search_notes",),
         scripted_answer="建议按间隔重复安排复习。",
     ),
     ScriptedCase(
@@ -298,8 +298,8 @@ SELFTEST_CASES: tuple[ScriptedCase, ...] = (
         scripted_answer="当前时间是 12:00。",
     ),
     ScriptedCase(
-        EvalCase("kw-miss", "怎么复习？", ("search_knowledge",), ("量子力学",)),
-        scripted_tools=("search_knowledge",),
+        EvalCase("kw-miss", "怎么复习？", ("search_notes",), ("量子力学",)),
+        scripted_tools=("search_notes",),
         scripted_answer="建议按间隔重复安排复习。",
     ),
 )

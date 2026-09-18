@@ -133,11 +133,23 @@ def cmd_guards(_: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_rag(_: argparse.Namespace) -> int:
-    """语义检索演示：字面匹配 vs 语义检索的对照（离线，零 API Key）。"""
-    from examples.rag_demo import main as rag_main
+def cmd_retrievers(args: argparse.Namespace) -> int:
+    """检索扩展点自检：列出已注册检索器，并用默认检索器跑一次查询（离线）。"""
+    from agent_kit.retrieval import create, default_name, describe
 
-    rag_main()
+    print("已注册检索器：")
+    for name, doc in describe().items():
+        mark = "（默认）" if name == default_name() else ""
+        print(f"  - {name}{mark}：{doc}")
+
+    query = getattr(args, "q", "") or "遗忘曲线"
+    hits = create().search(query, top_k=3)
+    print(f"\n默认检索器查「{query}」命中 {len(hits)} 条：")
+    for hit in hits:
+        snippet = " ".join(hit.text.split())[:80]
+        print(f"  [{hit.score:g}] {hit.doc_id}：{snippet}...")
+    if not hits:
+        print("  （无命中。想接语义检索？实现 Retriever 协议并注册即可）")
     return 0
 
 
@@ -258,8 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_guards = sub.add_parser("guards", parents=[common], help="Multi-Agent 防护演示（跑偏 / 循环拦截，离线）")
     p_guards.set_defaults(func=cmd_guards)
 
-    p_rag = sub.add_parser("rag", parents=[common], help="语义检索演示（字面匹配 vs 语义检索，离线）")
-    p_rag.set_defaults(func=cmd_rag)
+    p_ret = sub.add_parser("retrievers", parents=[common], help="检索扩展点自检（列出已注册检索器）")
+    p_ret.add_argument("--q", default="遗忘曲线", help="用默认检索器试查一句话")
+    p_ret.set_defaults(func=cmd_retrievers)
 
     p_eval = sub.add_parser("eval", parents=[common], help="Agent 效果评估（离线自检 / --real 真机）")
     p_eval.add_argument("--real", action="store_true", help="真机评估：调用真实模型，需要 API Key")

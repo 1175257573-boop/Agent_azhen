@@ -10,16 +10,20 @@ fastmcp==4.0.4
 requests==2.34.2
 pydantic==2.13.5
 
-# 记忆后端（已验证版本）
-# 短期记忆：Redis（消息窗口 + TTL）；长期记忆：PostgreSQL
+# 记忆后端：**默认 SQLite**，不用起任何服务
+langgraph-checkpoint-sqlite==3.1.1      # 短期记忆 checkpoint（官方实现）
+# 长期记忆 store 官方只提供 memory / postgres / redis 三种，
+# **没有 SQLite 版**（PyPI 上也不存在 langgraph-store-sqlite 这个包），
+# 所以项目自带 agent_kit/sqlite_store.py，只依赖标准库 sqlite3，无需额外安装。
+
+# 可选后端：要把记忆换成 Redis / PostgreSQL 时才需要下面这四条
 langgraph-checkpoint-redis==0.5.2
 langgraph-checkpoint-postgres==3.1.2
 psycopg[binary]==3.3.5
 redis==8.1.0
 
-# 可选：不想起 Redis / PG 时，用 sqlite 落盘（代码里 sqlite 分支会自动降级）
-# langgraph-checkpoint-sqlite==4.0.0
-# langgraph-store-sqlite==1.0.0
+# 配置层：atlas.toml 在 Python 3.11+ 走标准库 tomllib，低版本需要 tomli
+tomli>=2.0; python_version < "3.11"
 
 # Web 框架（FastAPI + ASGI 服务器）
 fastapi==0.141.1
@@ -28,8 +32,6 @@ uvicorn[standard]==0.53.0
 # 可选：读取项目根目录的 .env 兜底环境变量（缺失则静默跳过，不影响运行）
 python-dotenv==1.2.3
 
-# 检索（RAG）：向量存储与相似度计算走 numpy，不引入 FAISS 之类的重依赖
-# 之前是 langchain 的间接依赖，这里显式声明，避免上游调整后丢失
-# 上限锁在 2.3 之前：numpy 2.3+ 要求 Python >=3.11，而本项目支持 3.10
-# （本机装的是 2.5.3，但 CI 矩阵里有 py3.10，所以依赖文件必须按下限写）
-numpy>=2.0,<2.3
+# 检索：项目只内置字面检索（零依赖）。需要向量语义检索时自己实现一个 Retriever
+# 并注册进来（见 agent_kit/retrieval/），那时在这里加你自己的依赖即可，
+# 主线不再为此引入 numpy / 向量库。

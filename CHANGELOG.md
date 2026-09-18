@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+### 变更（架构调整：以 Codex CLI 为模板）
+
+- **记忆管理默认改为 SQLite，并统一收进家目录 `ATLAS_HOME`**：
+  · 新增 `agent_kit/home.py`：运行态目录约定（`~/.atlas`，可用 `ATLAS_HOME` 覆盖），
+    内含 `atlas.db` / `sessions/` / `memories/` / `logs/`（对标 Codex 的 `CODEX_HOME`）；
+  · `SHORT_TERM_BACKEND` / `LONG_TERM_BACKEND` 默认从「有 REDIS_URL / PG_DSN 才用」
+    改为 **sqlite**。理由：跑一次 demo 就要先起两个服务，门槛过高；
+    Redis / PostgreSQL 降级为可选后端，代码分支保留；
+  · **发现并修正一个真 bug**：官方 langgraph 只提供 `memory / postgres / redis` 三种
+    store，**没有 SQLite 版**，PyPI 上也不存在 `langgraph-store-sqlite` 这个包
+    （旧代码里 `from langgraph.store.sqlite import SqliteStore` 是一条永远走不通的分支，
+    会静默降级到内存）。现自带 `agent_kit/sqlite_store.py`，照 `BaseStore` 契约实现
+    `batch` / `abatch`，支持 put / get / search / delete / list_namespaces 与 TTL。
+- **新增 `atlas.toml` 配置层**（对标 Codex 的 `config.toml` + schema 校验）：
+  环境变量 > 项目根 `atlas.toml` > `~/.atlas/atlas.toml` > 默认值。
+  密钥仍只走环境变量——TOML 里出现 `api_key` / `token` / `secret` / `password`
+  这类字段时整份作废并回落默认值；字段用 pydantic schema 约束，多写字段直接报错。
+- **删除向量检索，改为可扩展接口**（`agent_kit/retrieval/` 包）：
+  · 删除 `agent_kit/retrieval.py`（324 行）、`search_knowledge` /
+    `rebuild_knowledge_index` 两个工具、`main.py rag` 子命令与 23 个相关测试；
+    依赖去掉 numpy（除检索外无其他使用点）；
+  · 新增 `base.py`（`Retriever` 协议 + `Hit`）、`registry.py`（注册 / 取用 / 列举，
+    **未注册就抛错，不静默降级**）、`keyword.py`（内置字面检索 `keyword` / `phrase`）；
+  · `search_notes` 改为走检索器注册表，换实现不用改工具层；
+    新增 `main.py retrievers` 自检命令。
+- 测试总数 107 → **134**（新增 `test_home.py`(5) / `test_config_toml.py`(5) /
+  `test_retrieval_protocol.py`(8) / `test_sqlite_store.py`(9)）。
+
 ### 新增
 
 - **Agent 效果评估 `agent_kit/evalset.py` + CLI `main.py eval`**：补上「单元测试证明不了
@@ -17,17 +45,6 @@
     → 显式检查 provider 并 fail fast，提示该配哪个环境变量。
 - `tests/test_evalset.py`：16 个用例（总数 114 → 130），含一条
   「自检集必须同时含通过与失败用例」的反向验证。
-
-- **检索（RAG）模块 `agent_kit/retrieval.py`**：切分 → 向量化 → 索引 → 余弦检索，
-  补上此前只有字面关键词匹配的短板（问「怎么复习才记得住」搜不到标题叫
-  「遗忘曲线」的笔记）。新增工具 `search_knowledge` / `rebuild_knowledge_index`，
-  CLI 子命令 `python main.py rag`。
-  · **向量库用 numpy 而非 FAISS**：语料只有几十篇，线性扫描足够，省掉 Windows 上的重依赖；
-  · **embedding 可降级**：`DashScopeEmbedder`（真实向量，需 Key）不可用时自动降到
-    `HashingEmbedder`（零依赖离线），降级显式返回 `degraded` + `reason`，不静默降质；
-  · 中文切字后补 bigram，否则「遗忘曲线」与「曲线遗忘」在 unigram 下完全相同。
-- `tests/test_retrieval.py`：23 个用例，含一条「字面检索落空 / 语义检索命中」的对照用例
-  （用例总数 91 → 114）。
 
 - **MCP 规范笔记 + 接入流程 Skill**：
   · `notes/mcp-protocol.md` —— 官方规范 `2026-07-28` 版要点。**重点记录协议变化**：

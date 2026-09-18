@@ -60,7 +60,7 @@ class HomeLayout:
     def logs_dir(self) -> Path:
         return self.root / "logs"
 
-    def ensure_dirs(self) -> "HomeLayout":
+    def ensure_dirs(self) -> HomeLayout:
         """按需创建目录（已存在则跳过）。返回自身方便链式调用。"""
         for d in (self.root, self.sessions_dir, self.memories_dir, self.logs_dir):
             d.mkdir(parents=True, exist_ok=True)

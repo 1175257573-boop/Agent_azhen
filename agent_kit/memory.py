@@ -179,8 +179,14 @@ def build_checkpointer(mode: str | None = None) -> Any:
 
             db_path = resolve_db_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
+            # from_conn_string 返回的是上下文管理器（和 PostgresSaver 一样），
+            # 直接把它当 saver 传给 create_agent 会报类型错误，必须先 __enter__
+            cm = SqliteSaver.from_conn_string(str(db_path))
+            saver = cm.__enter__()
+            atexit.register(_close_quietly, cm)
             RESOLVED["short"] = f"sqlite[{db_path.name}]"
-            return SqliteSaver.from_conn_string(str(db_path))
+            log.info("短期记忆 → SQLite %s", db_path)
+            return saver
         except Exception as exc:  # noqa: BLE001
             _degrade("短期记忆", "sqlite", exc)
 
@@ -307,7 +313,7 @@ def build_store(mode: str | None = None) -> BaseStore:
             db_path = resolve_db_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
             store = SqliteStore(db_path)
-            atexit.register(_close_quietly, store)
+            atexit.register(store.close)
             RESOLVED["long"] = f"sqlite[{db_path.name}]"
             log.info("长期记忆 → SQLite %s", db_path)
             return store

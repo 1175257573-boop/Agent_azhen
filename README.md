@@ -12,8 +12,8 @@
 
 ## ✨ 30 秒了解这个项目
 
-- **记忆分层**：短期走 Redis（消息窗口 + TTL），长期走 PostgreSQL（跨会话事实），
-  两者都不可用时优雅降级，不会崩。
+- **记忆分层**：短期（消息窗口 + checkpoint）与长期（跨会话事实）**默认都落 SQLite**
+  （`~/.atlas/atlas.db`，零服务、重启不丢），需要横向扩展时再切 Redis / PostgreSQL。
 - **8 种运行模式**：对话 / 结构化输出 / 动态模型工具 / MCP / Skills / Handoffs / Subagents / Router，
   一套代码覆盖 LangChain 1.x 的主要范式。
 - **任意模式可叠加 MCP**：不只是单独的 mcp 模式，chat 等模式也能并入 MCP 工具。
@@ -65,8 +65,9 @@ flowchart TB
     end
 
     subgraph 记忆
-      REDIS[("Redis<br/>短期消息窗口")]
-      PG[("PostgreSQL<br/>长期事实")]
+      SQLITE[("SQLite<br/>短期窗口 + 长期事实")]
+      REDIS[("Redis（可选）")]
+      PG[("PostgreSQL（可选）")]
     end
 
     CLI --> SVC
@@ -94,7 +95,7 @@ flowchart TB
 | [3. 配置](#sec3) | 密钥怎么配、从哪读 |
 | [4. 启动](#sec4) | CLI / Web / 会话内命令 |
 | [5. 八种能力模式](#sec5) | chat → router 逐个说明 |
-| [5.1 记忆层](#sec5-1) | Redis 短期 + PostgreSQL 长期 |
+| [5.1 记忆层](#sec5-1) | SQLite 为主（Redis / PostgreSQL 可选） |
 | [5.2 Multi-Agent 防护](#sec5-2) | 跑偏拦截 + 循环拦截 |
 | [5.3 Skill 与 MCP](#sec5-3) | 方法论 vs 能力，三层渐进式披露 |
 | [5.4 排队消息](#sec5-4) | Agent 忙碌时的输入缓存与自动发出 |
@@ -159,8 +160,11 @@ langchain-v1.4-demo/
     ├── tools.py                ≈ Service
     ├── middleware.py           ≈ Interceptor / Filter / AOP
     ├── memory.py               ≈ Mapper / Repository
+    ├── home.py                 ≈ 运行态家目录（ATLAS_HOME）
+    ├── sqlite_store.py         ≈ 长期记忆的 SQLite 实现（官方无此版本，自建）
     ├── models.py               ≈ 模型路由策略
-    ├── retrieval.py            ≈ 检索（切分 / 向量化 / 索引 / 语义检索）
+    ├── retrieval/              ≈ 检索扩展点（协议 + 注册表）
+    │   ├── base.py  ├── registry.py  └── keyword.py
     ├── dynamic_tools.py        ≈ 运行时工具可见性
     ├── streaming.py            ≈ 流式输出封装
     ├── mcp_client.py           ≈ MCP 客户端 + 拦截器
@@ -218,7 +222,7 @@ cp .env.example .env      # Linux / macOS
 copy .env.example .env    # Windows
 ```
 
-所有可用配置项（含 Redis / PostgreSQL / 记忆窗口 / 追踪）都列在
+所有可用配置项（含 atlas.toml、ATLAS_HOME、记忆窗口 / 追踪）都列在
 [`.env.example`](.env.example) 里，带中文注释。优先级：**系统环境变量 > `.env`**。
 
 <a id="sec4"></a>
@@ -234,7 +238,7 @@ python main.py chat --ask "现在几点"      # 单次问答，答完即退
 python main.py check                     # 环境变量自查
 python main.py info                      # 环境概况
 python main.py demo                      # 离线能力演示（8 个场景）
-python main.py demo --real-memory        # 演示时改用真实的 Redis / PostgreSQL
+python main.py demo --real-memory        # 演示时改用真实的 Redis / PostgreSQL（默认 SQLite）
 ```
 
 > **演示默认不碰生产存储**：`main.py demo` 会把记忆层切到进程内内存，
@@ -259,7 +263,7 @@ uvicorn server.app:app --reload    # 等价写法
 | 会话列表 / 切换 / 删除 | 左栏，读 Redis |
 | 8 种能力模式切换 | 左栏下拉 |
 | 记忆层状态 | 右栏，实时显示 Redis / PG 后端 |
-| 长期偏好增删改 | 右栏，直接写 PostgreSQL |
+| 长期偏好增删改 | 右栏，直接写长期记忆 store（默认 SQLite） |
 
 等价写法：`python -m agent_kit chat`、`.\\run.ps1 chat`、`agent-demo chat`（`pip install -e .` 后）。
 
@@ -296,18 +300,29 @@ uvicorn server.app:app --reload    # 等价写法
 | `router` | 多源知识库路由，可并行召回后汇总 |
 
 <a id="sec5-1"></a>
-## 5.1 记忆层：Redis（短期）+ PostgreSQL（长期）
+## 5.1 记忆层：SQLite 为主，Redis / PostgreSQL 可选
 
-两层记忆解决的问题不同，用的是两套存储：
+两层记忆解决的问题不同，但**默认都落在同一个 SQLite 库**里（表名不同）：
 
 | | 短期记忆 | 长期记忆 |
 |---|---|---|
 | 回答什么 | 这轮聊到哪了 | 这个用户是谁 |
-| 存储 | **Redis**（`RedisSaver`） | **PostgreSQL**（`PostgresStore`） |
+| 存储（默认） | **SQLite**（`SqliteSaver`） | **SQLite**（自建 `SqliteStore`） |
+| 存储（可选） | Redis（`RedisSaver`） | PostgreSQL（`PostgresStore`） |
 | 主键 | `thread_id` | `(namespace, user_id)` → `key` |
 | 内容 | 完整 messages 历史 | 跨会话事实 / 偏好 |
-| 过期 | TTL，默认 7 天（`REDIS_TTL_MINUTES`） | 不过期 |
+| 过期 | Redis 下走 TTL，默认 7 天 | 支持 `ttl`（分钟），默认不过期 |
 | 降级 | `InMemorySaver` | `InMemoryStore` |
+
+**为什么默认改成 SQLite**：跑一次 demo 就要先起 Redis + PostgreSQL，这个门槛会把
+大部分人挡在门外；而 SQLite 标准库自带、零配置、进程重启不丢，正好覆盖
+「单机开发 / 单机部署」这一档。要横向扩展再切到 Redis / PostgreSQL，代码不用改。
+
+**一个必须知道的坑**：官方 langgraph 只提供 `memory / postgres / redis` 三种 store，
+**没有 SQLite 版**（PyPI 上也不存在 `langgraph-store-sqlite` 这个包）。所以长期记忆的
+SQLite 实现是本项目自己写的（`agent_kit/sqlite_store.py`），照 `BaseStore` 契约实现
+`batch` / `abatch`，接口与 `InMemoryStore` 对齐。它的能力边界也写在了文件头：
+filter 只做等值匹配、`query` 走子串匹配、TTL 惰性清理。
 
 **消息窗口**：短期记忆在 Redis 里存全量（可回溯），但只把最近 N 条喂给模型，
 由 `memory.make_message_window()` 这个 `@before_model` 中间件实现。
@@ -316,15 +331,46 @@ uvicorn server.app:app --reload    # 等价写法
 
 > 消息窗口与 `SummarizationMiddleware` 是解决同一个问题的两种策略，**二者互斥，窗口优先**。
 
+### atlas.toml：运行参数写进文件（对标 Codex 的 config.toml）
+
+密钥仍然只走环境变量（不落盘）；但「一改就是一组」的运行参数适合写进文件——
+能进版本库、能评审、能复现。
+
+优先级：**环境变量 > 项目根 `atlas.toml` > `~/.atlas/atlas.toml` > 代码默认值**。
+
+```toml
+model_name = "qwen-plus"
+model_provider = "dashscope"
+
+[memory]
+short_term = "sqlite"        # memory | sqlite | redis
+long_term  = "sqlite"        # memory | sqlite | postgres
+
+[retrieval]
+name = "keyword"             # 检索器注册表里注册过的名字
+
+[approval_policy]
+value = "on-failure"         # untrusted | on-failure | never
+
+[sandbox]
+mode = "workspace-write"     # read-only | workspace-write | danger-full-access
+```
+
+两份校验：字段用 pydantic schema 约束（多写字段直接报错，早失败优于静默）；
+出现 `api_key` / `token` / `secret` / `password` 这类字段时**整份作废并回落默认值**——
+配置文件是要进版本库的，漏一个密钥进去就是事故。
+
 ### 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SHORT_TERM_BACKEND` | 配了 `REDIS_URL` 就 `redis` | `memory` / `sqlite` / `redis` |
+| `ATLAS_HOME` | `~/.atlas` | 运行态家目录，SQLite 库、会话、记忆快照都在这里 |
+| `SQLITE_PATH` | `$ATLAS_HOME/atlas.db` | 直接指定库文件路径 |
+| `SHORT_TERM_BACKEND` | `sqlite`（配了 `REDIS_URL` 就 `redis`） | `memory` / `sqlite` / `redis` |
 | `REDIS_URL` | — | `redis://localhost:6379/0` |
 | `REDIS_TTL_MINUTES` | `10080`（7 天） | checkpoint 过期时间 |
 | `MEMORY_WINDOW` | `20` | 进入上下文的最近消息条数 |
-| `LONG_TERM_BACKEND` | 配了 `PG_DSN` 就 `postgres` | `memory` / `sqlite` / `postgres` |
+| `LONG_TERM_BACKEND` | `sqlite`（配了 `PG_DSN` 就 `postgres`） | `memory` / `sqlite` / `postgres` |
 | `PG_DSN` | — | 也认 `POSTGRES_URL` / `DATABASE_URL` |
 | `PG_CONNECT_TIMEOUT` | `5` | 秒；不加 PG 连不通时会卡死而不是报错 |
 | `MEMORY_STRICT` | `0` | `1` = 后端连不上直接失败；`0` = 告警并降级内存 |
@@ -618,37 +664,55 @@ stdout 污染、硬编码凭据。自建的四个 server 用它审查是全 PASS
 > （`tools/list` + 逐个 `tools/call` 冒烟）。
 
 <a id="sec6-8"></a>
-### 6.8 检索（RAG）：字面匹配不够用，以及为什么要能降级
+### 6.8 检索：内置只留字面匹配，语义检索做成扩展点
 
-`search_notes` 是字面关键词匹配，问题很直接：问「怎么复习才记得住」，
+`search_notes` 走的是字面匹配，局限很直接：问「怎么复习才记得住」，
 而笔记里写的是「遗忘曲线」「间隔重复」——一个字都不重叠，必然搜不到。
 
-`agent_kit/retrieval.py` 补上语义检索这条路：切分 → 向量化 → 索引 → 余弦检索。
+语义检索确实能补上这个洞，但**它不该进主线**，理由是：
+
+- 要引 embedding 依赖 + 一份向量库，而「本地跑个 demo」根本用不到，纯负担；
+- 上一版的教训摆在那儿：embedding 不可用时悄悄降级成哈希向量，
+  输出看着正常，语义准确度却没了——**静默降质比没有这个功能更危险**；
+- Codex 这类成熟的编码 Agent 本身也不做 RAG，检索靠 `file-search` 一类文件搜索。
+
+所以主线只留一个**接缝**：`agent_kit/retrieval/`
+
+| 文件 | 职责 |
+|---|---|
+| `base.py` | `Retriever` 协议（一个 `name` + 一个 `search`）与 `Hit` 结构 |
+| `registry.py` | 注册 / 取用 / 列举；**未注册就抛错，绝不静默降级** |
+| `keyword.py` | 内置实现：`keyword` / `phrase` 两种字面打分，零依赖 |
 
 ```bash
-python main.py rag        # 对照演示：同一个问题，两种检索的结果差异
+python main.py retrievers            # 列出已注册检索器 + 用默认检索器试查一次
+python main.py retrievers --q "MCP 接入"
 ```
 
-**三个设计决定**
+**要接向量语义检索**：实现 `Retriever` 协议，注册进来，把 `atlas.toml` 的
+`[retrieval] name` 指过去即可，工具层一行都不用改——`search_notes` 只认协议。
 
-1. **向量库用 numpy，不引 FAISS / Chroma** —— 笔记库只有几十篇，线性扫描耗时可忽略，
-   却省掉一个在 Windows 上经常装不上的重依赖。
-2. **embedding 必须能降级** —— `DashScopeEmbedder`（真实语义向量，需 Key）
-   不可用时自动降到 `HashingEmbedder`（零依赖离线实现）。
-   降级是**显式**的：`get_embedder()` 返回 `degraded` 与 `reason`，
-   工具输出里会写明「当前为离线向量降级模式」，而不是悄悄给个质量差很多的结果。
-3. **中文用 bigram 补词序** —— 纯 unigram 下「遗忘曲线」和「曲线遗忘」完全一样，
-   加上相邻二字组才能区分。
+```python
+from agent_kit.retrieval import Hit, register
 
-**踩到的坑**
+class MyVectorRetriever:
+    """自己的向量检索器。"""
 
-- **有符号哈希会抵消归零**：初版把带符号的值累加后再取 `log`，
-  两个符号相反的碰撞词抵消成 0 → `log(0) = -inf` → 整条向量变 NaN。
-  改成词频（无符号）单独统计、符号只由哈希决定后解决。
-- **f-string 里不能有反斜杠**：`f"{re.sub(r'\s+', ...)}"` 在 Python 3.10 是语法错误
-  （3.12 才允许），本地 3.12 能跑而 CI 的 3.10 会直接 SyntaxError——
-  这是本项目第四次「本地绿、CI 红」。
-- **哈希必须用 `hashlib`**：内置 `hash()` 对字符串有进程级随机化，换进程索引就全废。
+    name = "vector"
+
+    def search(self, query: str, *, top_k: int = 3) -> list[Hit]:
+        ...  # 查你的向量库，返回按分数降序的 Hit 列表
+
+register("vector", MyVectorRetriever)
+```
+
+默认检索器的选取顺序：环境变量 `ATLAS_RETRIEVER` > `atlas.toml` 的 `[retrieval] name` > `keyword`。
+
+**上一版踩过的坑（留作记录）**
+
+- 有符号哈希会抵消归零：带符号累加后再取 `log`，两个碰撞词抵消成 0 →
+  `log(0) = -inf` → 整条向量变 NaN。
+- 内置 `hash()` 对字符串有进程级随机化，换进程索引就全废，必须用 `hashlib`。
 
 <a id="sec6-9"></a>
 ### 6.9 效果评估：单元测试证明不了 Agent 干得好
@@ -711,10 +775,10 @@ provider 并 fail fast，给出该配哪个环境变量的提示。
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 130 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 134 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
 python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
-python main.py rag            # 检索演示：字面匹配 vs 语义检索（离线）
+python main.py retrievers     # 检索扩展点自检：列出已注册检索器（离线）
 python main.py eval           # 效果评估：离线自检（验证评估器判得准）
 python main.py eval --real    # 效果评估：真机调用，产出真实指标（需 Key）
 ```
@@ -764,7 +828,7 @@ python main.py eval --real    # 效果评估：真机调用，产出真实指标
 
 `docker-compose.yml` 与安装脚本里的 `atlas/atlas`、`Redis 无密码`，
 **仅为本地开发方便而设，绝不可用于生产**。
-对外部署前请务必：给 Redis 设 `requirepass`、给 PostgreSQL 换强密码，
+对外部署前请务必：默认 SQLite 库落在 `~/.atlas`，注意文件权限；若切到 Redis / PostgreSQL，给 Redis 设 `requirepass`、给 PostgreSQL 换强密码，
 并把 `REDIS_URL` / `PG_DSN` 改到内网地址。
 
 另外三条，公开部署前请一并确认（详见 [`SECURITY.md`](SECURITY.md)）：

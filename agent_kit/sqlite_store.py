@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from langgraph.store.base import (
     BaseStore,
@@ -92,6 +93,10 @@ def _matches(value: Any, expected: Any) -> bool:
 class SqliteStore(BaseStore):
     """长期记忆的 SQLite 落盘实现。单文件、无外部服务、进程重启不丢。"""
 
+    # BaseStore 要求显式声明支持 TTL，否则 put(ttl=...) 会抛 NotImplementedError
+    supports_ttl = True
+    supports_index = False
+
     def __init__(self, db_path: str | Path, *, table: str = _TABLE) -> None:
         self.db_path = str(db_path)
         self.table = table
@@ -126,17 +131,9 @@ class SqliteStore(BaseStore):
         return self.batch(ops)
 
     def close(self) -> None:
+        """关闭连接。调用方通常在进程退出时统一收尾（memory.py 用 atexit 注册）。"""
         with self._lock:
             self._conn.close()
-
-    # 与 PostgresStore 的用法保持一致：调用方可以 `with ... as store`，
-    # 也可以交给 atexit 统一收尾（memory.py 走的是后者）。
-    def __enter__(self) -> "SqliteStore":
-        return self
-
-    def __exit__(self, *_exc: object) -> bool:
-        self.close()
-        return False
 
     # ------------------------------------------------------------------
     # 各操作
@@ -160,6 +157,16 @@ class SqliteStore(BaseStore):
 
     def _put(self, op: PutOp) -> None:
         ns = _ns_key(op.namespace)
+
+        # BaseStore.delete 的实现就是「put 一个 value=None」，这里要认出来
+        if op.value is None:
+            self._conn.execute(
+                f"DELETE FROM {self.table} WHERE namespace = ? AND key = ?",
+                (ns, op.key),
+            )
+            self._conn.commit()
+            return
+
         now = _now()
         expires = now + timedelta(minutes=op.ttl) if op.ttl else None
         self._conn.execute(

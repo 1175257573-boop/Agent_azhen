@@ -33,7 +33,7 @@ ADMIN_CTX: dict = {"user_id": "eval", "role": "admin", "locale": "zh-CN"}
 
 # 编排工具调用时要带上必需参数，否则工具会报「字段缺失」，
 # 日志里一堆红字，也让自检看起来像失败了
-_QUERY_TOOLS = {"search_knowledge", "search_notes"}
+_QUERY_TOOLS = {"search_notes"}
 
 
 def _args_for(tool_name: str, query: str) -> dict:
