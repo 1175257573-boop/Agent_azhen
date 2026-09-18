@@ -235,6 +235,21 @@ class ChatSession:
             print("\n（已中断本次回答）")
         except Exception as exc:  # noqa: BLE001
             print(f"\n[出错] {type(exc).__name__}: {exc}\n")
+        finally:
+            self._record_rollout()
+
+    def _record_rollout(self) -> None:
+        """本轮结束后把会话流水增量落盘（失败也不能影响对话本身）。"""
+        try:
+            from agent_kit import rollout
+
+            rollout.sync_from_checkpoint(
+                self.app.graph,
+                self.app.config.thread_id,
+                config=self.app.thread_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("会话流水落盘失败（已忽略）：%s: %s", type(exc).__name__, exc)
 
     def _stream(self, graph: Any, payload: Any) -> None:
         print("\nAtlas > ", end="", flush=True)

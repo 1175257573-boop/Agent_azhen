@@ -157,6 +157,44 @@ def cmd_retrievers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """会话流水（rollout）：列会话 / 回放 / 导出 JSONL / 删除。"""
+    from agent_kit import rollout
+
+    thread = getattr(args, "thread", None)
+    if not thread:
+        sessions = rollout.list_sessions()
+        if not sessions:
+            print("还没有会话流水。先跑 `python main.py chat --ask \"你好\"` 聊一轮，再来看这里。")
+            return 0
+        print("最近会话（按最后活动排序）：")
+        for item in sessions:
+            print(f"  {item['thread_id']:24} {item['turns']:>4} 条   最后活动 {item['last_at']}")
+        print("\n回放：python main.py sessions --thread <thread_id>")
+        return 0
+
+    if args.export:
+        count = rollout.export(thread, args.export)
+        print(f"已导出 {count} 条流水 → {args.export}")
+        return 0
+
+    if args.clear:
+        count = rollout.clear(thread)
+        print(f"已删除会话 {thread} 的 {count} 条流水")
+        return 0
+
+    records = rollout.load(thread)
+    if not records:
+        print(f"会话 {thread} 没有流水记录。")
+        return 0
+    print(f"会话 {thread}（共 {len(records)} 条）：")
+    for item in records:
+        name = f" [{item['tool_name']}]" if item["tool_name"] else ""
+        text = item["content"].replace("\n", " ")[:100]
+        print(f"  {item['seq']:>3} {item['role']:<8}{name} {text}")
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     """Agent 效果评估：离线自检（默认）或真机评估（--real）。"""
     from examples.eval_demo import main as eval_main
@@ -294,6 +332,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ret = sub.add_parser("retrievers", parents=[common], help="检索扩展点自检（列出已注册检索器）")
     p_ret.add_argument("--q", default="遗忘曲线", help="用默认检索器试查一句话")
     p_ret.set_defaults(func=cmd_retrievers)
+
+    p_sess = sub.add_parser("sessions", parents=[common], help="会话流水（rollout）：列会话 / 回放 / 导出")
+    p_sess.add_argument("--thread", help="会话 thread_id；不填则列出最近会话")
+    p_sess.add_argument("--export", metavar="PATH", help="把该会话导出为 JSONL")
+    p_sess.add_argument("--clear", action="store_true", help="删除该会话的流水")
+    p_sess.set_defaults(func=cmd_sessions)
 
     p_eval = sub.add_parser("eval", parents=[common], help="Agent 效果评估（离线自检 / --real 真机）")
     p_eval.add_argument("--real", action="store_true", help="真机评估：调用真实模型，需要 API Key")
