@@ -157,6 +157,35 @@ def cmd_retrievers(args: argparse.Namespace) -> int:
     return 0
 
 
+def memories_top_n() -> int:
+    """Phase 2 默认参与合并的条数，唯一真相源在 memories.py。"""
+    from agent_kit.memories import DEFAULT_TOP_N
+
+    return DEFAULT_TOP_N
+
+
+def cmd_memories(args: argparse.Namespace) -> int:
+    """记忆产出管线：Phase 1 抽取（每会话一条）+ Phase 2 合并（出 MEMORY.md）。"""
+    from agent_kit import memories
+
+    if args.show:
+        records = memories.all_records()
+        if not records:
+            print("还没有抽取过任何记忆。跑一次 `python main.py memories` 试试（需要真实模型）。")
+            return 0
+        print(f"已抽取 {len(records)} 条记忆：")
+        for record in records:
+            print(f"  {record.thread_id:24} 用 {record.usage_count:>2} 次  {record.summary[:60]}")
+        return 0
+
+    phase = args.phase
+    if phase in ("1", "both"):
+        print(memories.run_phase1().to_text())
+    if phase in ("2", "both"):
+        print(memories.run_phase2(top_n=args.top).to_text())
+    return 0
+
+
 def cmd_sessions(args: argparse.Namespace) -> int:
     """会话流水（rollout）：列会话 / 回放 / 导出 JSONL / 删除。"""
     from agent_kit import rollout
@@ -332,6 +361,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ret = sub.add_parser("retrievers", parents=[common], help="检索扩展点自检（列出已注册检索器）")
     p_ret.add_argument("--q", default="遗忘曲线", help="用默认检索器试查一句话")
     p_ret.set_defaults(func=cmd_retrievers)
+
+    p_mem = sub.add_parser("memories", parents=[common], help="记忆产出：Phase1 抽取 + Phase2 合并出 MEMORY.md")
+    p_mem.add_argument("--show", action="store_true", help="只列出已抽取的记忆")
+    p_mem.add_argument("--phase", choices=("1", "2", "both"), default="both", help="只跑某个阶段")
+    p_mem.add_argument("--top", type=int, default=memories_top_n(), help="Phase2 参与合并的记忆条数")
+    p_mem.set_defaults(func=cmd_memories)
 
     p_sess = sub.add_parser("sessions", parents=[common], help="会话流水（rollout）：列会话 / 回放 / 导出")
     p_sess.add_argument("--thread", help="会话 thread_id；不填则列出最近会话")

@@ -33,6 +33,28 @@
 - 测试总数 107 → **134**（新增 `test_home.py`(5) / `test_config_toml.py`(5) /
   `test_retrieval_protocol.py`(8) / `test_sqlite_store.py`(9)）。
 
+### 新增（Codex 模板第二批）
+
+- **审批 / 沙箱策略 `agent_kit/policy.py`**（对标 Codex 的 `approval_policy` + `sandbox_mode`）：
+  · 审批三档 `untrusted`（写前必问，默认）/ `on-failure`（失败才转人工）/ `never`；
+    沙箱三档 `read-only` / `workspace-write`（默认）/ `danger-full-access`；
+  · 优先级：CLI > 环境变量 `ATLAS_APPROVAL`/`ATLAS_SANDBOX` > atlas.toml > 默认值；
+    旧的 `--role` / `--no-hitl` 仍作为最高优先级覆盖（`--no-hitl` = never）；
+  · `on-failure` 档新增 `failure_escalation` 中间件：写工具失败后**不再让模型自动重试**，
+    标记需人工复核；装配改为由策略派生 hitl / 写工具装载 / readonly。
+  · ⚠️ 与 Codex 的差异如实标注：Codex 是 OS 级沙箱（seatbelt / landlock），
+    本项目只是路径约束 + 中间件拦截。
+- **会话流水 `agent_kit/rollout.py`**（对标 Codex 的 rollout）：
+  · 每轮结束增量落 SQLite，**数据源是 checkpointer**（不另记一份，避免两处真相）；
+  · `main.py sessions`：列会话 / 回放 / 导出 JSONL / 删除。
+- **记忆产出 `agent_kit/memories.py`**（对标 Codex 的 memories，两阶段）：
+  · Phase 1 per-thread 抽取（结构化输出 raw_memory / rollout_summary / slug）；
+  · Phase 2 全局合并：按 `usage_count` → `last_usage` 取前 N 条（超 30 天未用淘汰），
+    同步 `raw_memories.md` + `rollout_summaries/`，再合并出 `MEMORY.md`；
+  · **红线：没有可用模型时明确跳过并说明原因，绝不编造记忆**（有测试兜底）；
+  · 实测坑：模型会把整篇正文用 Markdown 代码围栏包起来，prompt 约束不住，落盘前再剥一层。
+- 测试 144 → **159**（`test_policy.py` 10 / `test_rollout.py` 7 / `test_memories.py` 8）。
+
 ### 新增
 
 - **Agent 效果评估 `agent_kit/evalset.py` + CLI `main.py eval`**：补上「单元测试证明不了

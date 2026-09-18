@@ -375,6 +375,51 @@ mode = "workspace-write"     # read-only | workspace-write | danger-full-access
 | `PG_CONNECT_TIMEOUT` | `5` | 秒；不加 PG 连不通时会卡死而不是报错 |
 | `MEMORY_STRICT` | `0` | `1` = 后端连不上直接失败；`0` = 告警并降级内存 |
 
+### 审批与沙箱策略（对标 Codex 的 approval_policy / sandbox_mode）
+
+两个档位决定「写操作要不要先问人」和「能写到哪」，一处解析、处处生效：
+
+| 档位 | 取值 | 含义 |
+|---|---|---|
+| 审批 | `untrusted`（默认） | 写操作**调用前**一律人工确认（可 approve / edit / reject） |
+| | `on-failure` | 默认放行；写工具**失败后**不再让模型自动重试，标记需人工复核 |
+| | `never` | 全程不拦（等价于 `--no-hitl`） |
+| 沙箱 | `read-only` | 不装载写工具 |
+| | `workspace-write`（默认） | 写工具可用，落盘限制在工作区内 |
+| | `danger-full-access` | 放宽到工作区根目录（启动时告警） |
+
+优先级：**CLI `--approval`/`--sandbox` > 环境变量 `ATLAS_APPROVAL`/`ATLAS_SANDBOX` > atlas.toml > 默认值**。
+默认取最严的一档，放宽要显式写进配置。⚠️ 与 Codex 的差异：Codex 是 OS 级沙箱
+（seatbelt / landlock），本项目只是**路径约束 + 中间件拦截**，不是真沙箱。
+
+### 会话流水（rollout，对标 Codex 的 rollout）
+
+每轮对话结束后增量落进 `~/.atlas/atlas.db` 的 `rollout` 表，**数据源是 checkpointer**
+（不另记一份，避免两处真相）。Codex 用每会话一个 JSONL 文件，本项目存表，需要带走时导出。
+
+```bash
+python main.py sessions                       # 列最近会话
+python main.py sessions --thread <id>         # 回放
+python main.py sessions --thread <id> --export out.jsonl
+```
+
+### 记忆产出：Phase 1 抽取 + Phase 2 合并（对标 Codex 的 memories）
+
+`memory.py` 管**存哪**，`memories.py` 管**记住什么**——两段管线：
+
+- **Phase 1（per-thread）**：一个会话 → 一条结构化记忆（`raw_memory` / `rollout_summary` / `slug`）
+- **Phase 2（global）**：按 `usage_count` → `last_usage` 取前 N 条（默认 20，超 30 天未用则淘汰），
+  同步成 `raw_memories.md` + `rollout_summaries/*.md`，再合并出 `MEMORY.md`
+
+```bash
+python main.py memories                # 跑完整管线（需要真实模型）
+python main.py memories --show         # 只看已抽取了什么
+```
+
+**红线：不编造记忆。** 没有可用模型（provider=fake 或缺 Key）时**明确跳过并说明原因**，
+只用模板拼一段像记忆的文字是绝对不行的。另外实测到一个坑：模型会把整篇正文用 Markdown 代码围栏包起来，
+prompt 约束不住，所以落盘前还要再剥一层。
+
 ### 起服务
 
 推荐直接用容器，`docker-compose.yml` 里已经配好了两个服务：
@@ -775,10 +820,12 @@ provider 并 fail fast，给出该配哪个环境变量的提示。
 
 ```bash
 pip install pytest ruff       # 或 pip install -e ".[dev]"
-pytest -q                     # 134 个用例，不依赖 Redis / PG / 真实 Key
+pytest -q                     # 159 个用例，不依赖 Redis / PG / 真实 Key
 ruff check .                  # 静态检查
 python main.py guards         # 防护演示：跑偏 / 循环拦截（离线）
 python main.py retrievers     # 检索扩展点自检：列出已注册检索器（离线）
+python main.py sessions       # 会话流水：列会话 / 回放 / 导出
+python main.py memories       # 记忆产出：Phase1 抽取 + Phase2 合并出 MEMORY.md
 python main.py eval           # 效果评估：离线自检（验证评估器判得准）
 python main.py eval --real    # 效果评估：真机调用，产出真实指标（需 Key）
 ```
