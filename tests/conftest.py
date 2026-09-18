@@ -29,6 +29,9 @@ def _isolated_env(tmp_path, monkeypatch):
                  "DASHSCOPE_API_KEY", "LLM_PROVIDER"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MEMORY_STRICT", "0")
+    # 家目录必须隔离：忘记传 db_path / memories_dir 的用例会真的写到 ~/.atlas，
+    # 而 Phase 2 还会在那里 git init —— 落到开发机上就是凭空多出一个仓库
+    monkeypatch.setenv("ATLAS_HOME", str(tmp_path / "atlas-home"))
     monkeypatch.chdir(tmp_path)
     yield
 

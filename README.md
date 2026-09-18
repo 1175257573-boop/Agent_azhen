@@ -414,11 +414,50 @@ python main.py sessions --thread <id> --export out.jsonl
 ```bash
 python main.py memories                # 跑完整管线（需要真实模型）
 python main.py memories --show         # 只看已抽取了什么
+python main.py memories --leases       # 看抽取台账：谁持锁 / 失败几次 / 下次何时重试
+python main.py memories --phase 2 --no-git   # 不用 git 基线，退回全量重写
 ```
 
 **红线：不编造记忆。** 没有可用模型（provider=fake 或缺 Key）时**明确跳过并说明原因**，
 只用模板拼一段像记忆的文字是绝对不行的。另外实测到一个坑：模型会把整篇正文用 Markdown 代码围栏包起来，
 prompt 约束不住，所以落盘前还要再剥一层。
+
+#### Phase 1 的并发保护：lease / claim
+
+两个终端同时跑、或后台任务与前台命令撞车时，同一个会话会被抽两次——重复抽取不只是浪费调用，
+两次结果不同还会让 `MEMORY.md` 在两版记忆之间反复横跳。做法是给每条会话一把 lease，抢到才干活：
+
+| 机制 | 说明 |
+|---|---|
+| 条件 UPDATE 抢锁 | `UPDATE ... WHERE lease_until IS NULL OR lease_until < ?` 在 `BEGIN IMMEDIATE` 事务里执行，每轮恰好一个赢家 |
+| lease 过期 | 默认 120 秒；持有者进程被杀后别人能接手，不会永久悬挂 |
+| 失败退避 | 10s → 60s → 停止；超过 3 次就停在 `failed` 等人介入，不无限重试 |
+| 内容指纹 CAS | 台账记 `source_digest`，**在 UPDATE 条件里**比对；流水没变就不重复抽 |
+
+最后一条为什么必须放进 SQL 条件里：先查「内容变没变」再决定抢不抢，中间会漏出一个窗口——
+两个 worker 都查到「变了」，前一个刚干完，后一个又抽一遍覆盖掉成果。
+放进同一个 UPDATE 的条件，判断和抢占就是一步。
+
+互斥真正来自那条**单条 UPDATE 的原子性**（SQLite 执行单条 UPDATE 时持写锁），
+不是 `BEGIN IMMEDIATE`——这点本机做过对照实验（8 线程 × 20 轮：两种写法都是每轮恰好 1 个赢家、
+0 次 busy 错误）。`BEGIN IMMEDIATE` 的作用是把「补台账行」和「改占有状态」合成一个单元，
+并且先拿写锁再干活，省掉无谓的重试。
+
+#### Phase 2 的 git 基线 diff（对标 Codex 的 workspace diff）
+
+`~/.atlas/memories` 下会有个 git 仓库（本地私有，不 push），每次合并前先落一次快照，
+同步产物后做 workspace diff：
+
+```bash
+git -C ~/.atlas/memories log --oneline      # 看每次合并的轨迹
+```
+
+带来两个实际收益：
+
+1. 合并时把「这次变了哪些文件」交给模型，让它只消化增量而不是每次全量重读
+2. **产物相对基线一字未变时直接跳过 LLM 调用**——`memories` 连跑两遍，第二遍不再烧 Token
+
+git 不在 PATH 里时会明确写进运行报告的 `说明` 行并退回全量重写，不静默假装成功。
 
 ### 起服务
 

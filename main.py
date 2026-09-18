@@ -178,11 +178,33 @@ def cmd_memories(args: argparse.Namespace) -> int:
             print(f"  {record.thread_id:24} 用 {record.usage_count:>2} 次  {record.summary[:60]}")
         return 0
 
+    if args.leases:
+        leases = memories.list_leases()
+        if not leases:
+            print("还没有任何抽取台账。跑一次 Phase 1 就会有。")
+            return 0
+        print(f"{len(leases)} 条会话的抽取台账：")
+        for item in leases:
+            print(f"  {item.thread_id:24} {item.state:8} 失败 {item.attempts} 次  "
+                  f"持有者 {item.owner or '-'}  更新于 {item.updated_at}")
+            if item.last_error:
+                print(f"      上次错误：{item.last_error[:100]}")
+        print("\n想让某条会话重跑：手工删台账或用 `memories --thread <id> --force`")
+        return 0
+
+    if args.thread:
+        report = memories.run_phase1(
+            threads=[args.thread],
+            force=args.force,
+        )
+        print(report.to_text())
+        return 0
+
     phase = args.phase
     if phase in ("1", "both"):
-        print(memories.run_phase1().to_text())
+        print(memories.run_phase1(force=args.force).to_text())
     if phase in ("2", "both"):
-        print(memories.run_phase2(top_n=args.top).to_text())
+        print(memories.run_phase2(top_n=args.top, use_git=not args.no_git).to_text())
     return 0
 
 
@@ -364,8 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mem = sub.add_parser("memories", parents=[common], help="记忆产出：Phase1 抽取 + Phase2 合并出 MEMORY.md")
     p_mem.add_argument("--show", action="store_true", help="只列出已抽取的记忆")
+    p_mem.add_argument("--leases", action="store_true", help="列出 Phase1 的抽取台账（锁状态 / 失败次数）")
     p_mem.add_argument("--phase", choices=("1", "2", "both"), default="both", help="只跑某个阶段")
     p_mem.add_argument("--top", type=int, default=memories_top_n(), help="Phase2 参与合并的记忆条数")
+    p_mem.add_argument("--thread", help="只抽取这一个会话")
+    p_mem.add_argument("--force", action="store_true", help="强制重抽：忽略「流水没变就跳过」和已完成状态")
+    p_mem.add_argument("--no-git", action="store_true", help="Phase2 不用 git 基线 diff，退回全量重写")
     p_mem.set_defaults(func=cmd_memories)
 
     p_sess = sub.add_parser("sessions", parents=[common], help="会话流水（rollout）：列会话 / 回放 / 导出")

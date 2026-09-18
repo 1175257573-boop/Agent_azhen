@@ -55,6 +55,30 @@
   · 实测坑：模型会把整篇正文用 Markdown 代码围栏包起来，prompt 约束不住，落盘前再剥一层。
 - 测试 144 → **159**（`test_policy.py` 10 / `test_rollout.py` 7 / `test_memories.py` 8）。
 
+### 新增（Codex 模板第三批：并发保护 + git 基线）
+
+- **Phase 1 加 lease/claim 并发保护**（`agent_kit/memories.py`）：新增 `memory_lease` 台账表
+  （state / owner / lease_until / attempts / next_attempt_at / source_digest）。
+  · 抢锁是 `BEGIN IMMEDIATE` 事务里的一条**条件 UPDATE**；lease 默认 120 秒、过期可被接手；
+    失败按 10s → 60s → 停止退避，超过 3 次停在 `failed` 等人介入；
+  · **内容指纹做 CAS**：`source_digest` 作为 UPDATE 条件之一，流水没变就不重复抽取。
+    放在事务外「先查后抢」会漏出窗口（两个 worker 都查到内容变了，后者覆盖前者成果）；
+  · 修正一个自己的错误认知：互斥来自单条 UPDATE 的原子性，**不是** `BEGIN IMMEDIATE`。
+    对照实验 8 线程 × 20 轮，两种写法都是每轮恰好 1 个赢家、0 次 busy 错误。
+    `BEGIN IMMEDIATE` 的实际作用是让「补台账行 + 改状态」成一个单元且先拿写锁再干活；
+  · 修正一个真 bug：旧实现的 claim 条件里有 `state != 'done'`，导致**会话接着聊、流水变了也抽不了**。
+- **Phase 2 加 git 基线 diff**（新增 `agent_kit/memory_git.py`，对标 Codex 的 workspace diff）：
+  `~/.atlas/memories` 下维护一个本地 git 仓库，流程改为「基线快照 → 同步产物 → diff →
+  有变更才调模型 → 再落快照」。产物相对基线无变化时**直接跳过 LLM 调用**；
+  变更清单会拼进合并 prompt，让模型只消化增量。git 不可用时报在运行报告的 `说明` 行，不静默降级。
+  · 提交身份用 `-c user.name/email` 注入而非依赖全局 config（CI / 容器里通常没配，
+    否则 commit 直接失败）；`-c core.autocrlf=false` 避免 Windows 上行尾抖动。
+- `memories` 命令新增 `--leases`（看台账）/ `--thread`（单会话）/ `--force`（强抽）/ `--no-git`。
+- `tests/conftest.py` 补 `ATLAS_HOME` 隔离：Phase 2 会在家目录里 git init，
+  漏传路径的用例会真的在开发机 `~/.atlas` 建仓库。
+- 测试 159 → **183**（`test_memory_lease.py` 14 / `test_memory_git.py` 10）。
+  含 8 线程抢同一把锁必须恰好一个赢家、多进程端到端（4 进程 5 会话零重复）两轮验证。
+
 ### 新增
 
 - **Agent 效果评估 `agent_kit/evalset.py` + CLI `main.py eval`**：补上「单元测试证明不了
