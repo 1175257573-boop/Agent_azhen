@@ -24,9 +24,13 @@ from agent_kit import memory as mem
 from agent_kit.agent import build_agent
 from agent_kit.config import AgentSettings, require_api_key
 from agent_kit.dynamic_tools import DynamicToolMiddleware, make_state_based_tools
+from agent_kit.logging_conf import get_logger
 from agent_kit.models import make_dynamic_model
+from agent_kit.policy import resolve
 from agent_kit.state import TaskState
 from agent_kit.tools import ALL_TOOLS, SAFE_TOOLS
+
+log = get_logger("agent.app")
 
 MODES = ("chat", "structured", "dynamic", "mcp", "skills", "handoffs", "subagents", "router")
 
@@ -49,7 +53,10 @@ class AppConfig:
     provider: str | None = None
     model_name: str = ""
     mode: str = "chat"
-    enable_hitl: bool = False
+    # None = 未指定，交给 policy.py 按 atlas.toml / 环境变量 / 默认值决定
+    enable_hitl: bool | None = None
+    approval: str | None = None       # untrusted | on-failure | never
+    sandbox: str | None = None        # read-only | workspace-write | danger-full-access
     enable_summarization: bool = True
     readonly: bool = False
     thread_id: str = "atlas-main"
@@ -86,6 +93,7 @@ class BuiltApp:
     is_mcp: bool = False        # 工具集里含 MCP 工具 → 必须走 astream
     mcp_hub: Any = None         # 持有 MCP 连接（stdio 子进程），防止被 GC 回收
     mcp_tool_names: list = field(default_factory=list)
+    policy: Any = None         # 审批 / 沙箱策略，main.py info 会打印
 
     @property
     def thread_config(self) -> dict:
@@ -126,11 +134,21 @@ def build_app(cfg: AppConfig) -> BuiltApp:
     store = mem.build_store()
     mem.seed_long_term_memory(store, user_id=cfg.user_id)
 
+    # 审批 / 沙箱策略：一处解析，全程复用（旧的 --role / --no-hitl 仍作为最高优先级覆盖）
+    policy = resolve(
+        cli_approval=cfg.approval,
+        cli_sandbox=cfg.sandbox,
+        cli_hitl=cfg.enable_hitl,
+        role=cfg.role,
+    )
+    for warning in policy.warnings:
+        log.warning("[policy] %s", warning)
+
     if cfg.mode == "handoffs":
         from agent_kit.multi_agent.handoffs import build_handoff_agent
 
         graph = build_handoff_agent(model, checkpointer=checkpointer)
-        return BuiltApp(graph, cfg, settings, checkpointer, store)
+        return BuiltApp(graph, cfg, settings, checkpointer, store, policy=policy)
 
     if cfg.mode == "router":
         from agent_kit.multi_agent.router import build_router_workflow
@@ -141,7 +159,7 @@ def build_app(cfg: AppConfig) -> BuiltApp:
             "chat": ("你是沟通记录专家，负责从讨论记录里找结论。", []),
         }
         graph = build_router_workflow(model, sources)
-        return BuiltApp(graph, cfg, settings, checkpointer, store, is_workflow=True)
+        return BuiltApp(graph, cfg, settings, checkpointer, store, is_workflow=True, policy=policy)
 
     if cfg.mode == "skills":
         from agent_kit.builtin_skills import PROJECT_ENGINEERING
@@ -169,14 +187,14 @@ def build_app(cfg: AppConfig) -> BuiltApp:
             settings,
             model=model,
             tools=list(SAFE_TOOLS) + cfg.extra_tools,
-            include_write_tools=True,
+            include_write_tools=policy.write_tools,
             middleware_extra=[SkillMiddleware(skills=skills)],
             checkpointer=checkpointer,
             store=store,
             state_schema=TaskState,
             message_window=cfg.window,
         ).graph
-        return BuiltApp(graph, cfg, settings, checkpointer, store)
+        return BuiltApp(graph, cfg, settings, checkpointer, store, policy=policy)
 
     if cfg.mode == "subagents":
         from agent_kit.multi_agent.subagents import build_tool_per_agent
@@ -194,7 +212,7 @@ def build_app(cfg: AppConfig) -> BuiltApp:
             store=store,
             message_window=cfg.window,
         ).graph
-        return BuiltApp(graph, cfg, settings, checkpointer, store)
+        return BuiltApp(graph, cfg, settings, checkpointer, store, policy=policy)
 
     if cfg.mode == "structured":
         graph = build_agent(
@@ -206,7 +224,7 @@ def build_app(cfg: AppConfig) -> BuiltApp:
             store=store,
             message_window=cfg.window,
         ).graph
-        return BuiltApp(graph, cfg, settings, checkpointer, store)
+        return BuiltApp(graph, cfg, settings, checkpointer, store, policy=policy)
 
     if cfg.mode == "dynamic":
         # 同一 provider 下的「轻/重」两个模型：轻模型省钱，重模型兜底
@@ -226,22 +244,23 @@ def build_app(cfg: AppConfig) -> BuiltApp:
             state_schema=TaskState,
             message_window=cfg.window,
         ).graph
-        return BuiltApp(graph, cfg, settings, checkpointer, store)
+        return BuiltApp(graph, cfg, settings, checkpointer, store, policy=policy)
 
     # ---------- 默认：chat ----------
     graph = build_agent(
         settings,
         model=model,
         tools=list(ALL_TOOLS) + cfg.extra_tools,
-        include_write_tools=True,
-        enable_hitl=cfg.enable_hitl,
+        include_write_tools=policy.write_tools,
+        enable_hitl=policy.hitl,
         enable_summarization=cfg.enable_summarization,
-        readonly=cfg.readonly,
+        readonly=policy.readonly or cfg.readonly,
+        escalate_on_failure=policy.escalate_on_failure,
         checkpointer=checkpointer,
         store=store,
         message_window=cfg.window,
     ).graph
-    return BuiltApp(graph, cfg, settings, checkpointer, store)
+    return BuiltApp(graph, cfg, settings, checkpointer, store, policy=policy)
 
 
 async def build_app_async(cfg: AppConfig) -> BuiltApp:
@@ -270,6 +289,15 @@ async def build_app_async(cfg: AppConfig) -> BuiltApp:
     store = mem.build_store()
     mem.seed_long_term_memory(store, user_id=cfg.user_id)
 
+    policy = resolve(
+        cli_approval=cfg.approval,
+        cli_sandbox=cfg.sandbox,
+        cli_hitl=cfg.enable_hitl,
+        role=cfg.role,
+    )
+    for warning in policy.warnings:
+        log.warning("[policy] %s", warning)
+
     from agent_kit.mcp_client import MCPHub, make_arg_injector, mcp_audit
 
     hub = MCPHub()
@@ -281,19 +309,20 @@ async def build_app_async(cfg: AppConfig) -> BuiltApp:
 
     if cfg.mode == "mcp":
         tools = list(SAFE_TOOLS) + mcp_tools
-        include_write = False
+        include_write = False          # mcp 模式只演示只读工具，写工具不并入
     else:
         tools = list(ALL_TOOLS) + list(cfg.extra_tools) + mcp_tools
-        include_write = True
+        include_write = policy.write_tools
 
     built = build_agent(
         settings,
         model=model,
         tools=tools,
         include_write_tools=include_write,
-        enable_hitl=cfg.enable_hitl,
+        enable_hitl=policy.hitl,
         enable_summarization=cfg.enable_summarization,
-        readonly=cfg.readonly,
+        readonly=policy.readonly or cfg.readonly,
+        escalate_on_failure=policy.escalate_on_failure,
         middleware_extra=middleware_extra,
         checkpointer=checkpointer,
         store=store,
@@ -301,7 +330,7 @@ async def build_app_async(cfg: AppConfig) -> BuiltApp:
     )
     return BuiltApp(
         built.graph, cfg, settings, checkpointer, store,
-        is_mcp=True, mcp_hub=hub, mcp_tool_names=[t.name for t in mcp_tools],
+        is_mcp=True, mcp_hub=hub, mcp_tool_names=[t.name for t in mcp_tools], policy=policy,
     )
 
 

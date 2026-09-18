@@ -314,9 +314,13 @@ class RetrievalConfig(BaseModel):
 
 
 class ApprovalConfig(BaseModel):
-    """写操作/敏感操作的审批档位（对标 Codex 的 approval_policy）。"""
+    """写操作/敏感操作的审批档位（对标 Codex 的 approval_policy）。
 
-    value: Literal["untrusted", "on-failure", "never"] = "on-failure"
+    默认取最严的 `untrusted`：写操作前一律先问。放宽要在配置里显式写明白，
+    让"放宽"这件事留下痕迹，而不是默认就放行。
+    """
+
+    value: Literal["untrusted", "on-failure", "never"] = "untrusted"
 
 
 class SandboxConfig(BaseModel):

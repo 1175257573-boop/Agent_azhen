@@ -77,6 +77,7 @@ def build_agent(
     message_window: int | None = None,
     enable_goal_anchor: bool = True,
     budget: dict | None = None,
+    escalate_on_failure: bool = False,
 ) -> BuiltAgent:
     """一站式组装 Agent。
 
@@ -128,6 +129,7 @@ def build_agent(
         message_window=message_window,
         enable_goal_anchor=enable_goal_anchor,
         budget=budget,
+        escalate_on_failure=escalate_on_failure,
     )
     # 场景中间件排在内置中间件之后：先过护栏，再走场景逻辑
     middleware.extend(middleware_extra)

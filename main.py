@@ -52,7 +52,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
         provider=args.provider or None,
         model_name=args.model or "",
         mode=args.mode,
-        enable_hitl=not args.no_hitl,
+        # 不传 --no-hitl 时留空（None），让 atlas.toml / 环境变量决定审批档位；
+        # 只有显式传了 --no-hitl 才强制 never
+        enable_hitl=False if args.no_hitl else None,
+        approval=getattr(args, "approval", None),
+        sandbox=getattr(args, "sandbox", None),
         thread_id=args.thread,
         user_id=args.user,
         role=args.role,
@@ -199,6 +203,15 @@ def cmd_info(_: argparse.Namespace) -> int:
     for line in mem.report_lines():
         print(line)
 
+    from agent_kit.policy import describe, resolve
+
+    policy = resolve()
+    print("\n  审批 / 沙箱策略：")
+    print(f"    {describe(policy)}")
+    print(f"    取值来源：{policy.source}")
+    for warning in policy.warnings:
+        print(f"    ⚠️ {warning}")
+
     print("\n  能力模式：")
     for name, desc in MODE_HELP.items():
         print(f"    {name:12} {desc}")
@@ -244,7 +257,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--thread", default="atlas-main", help="会话 thread_id")
     p_chat.add_argument("--user", default="demo", help="用户标识（长期记忆按此隔离）")
     p_chat.add_argument("--role", default="admin", help="角色：admin 可写文件，其余只读")
-    p_chat.add_argument("--no-hitl", action="store_true", help="关闭写操作的二次确认")
+    p_chat.add_argument("--no-hitl", action="store_true", help="关闭写操作的二次确认（等价于 --approval never）")
+    p_chat.add_argument(
+        "--approval",
+        help="审批档位：untrusted（写前必问，默认）/ on-failure（失败才转人工）/ never（全放行）",
+    )
+    p_chat.add_argument(
+        "--sandbox",
+        help="沙箱档位：read-only / workspace-write（默认）/ danger-full-access",
+    )
     p_chat.add_argument("--mcp", action="store_true", help="在当前模式上叠加 MCP Server 的工具")
     p_chat.add_argument("--ask", help="单次问答，答完即退出（不进交互）")
     p_chat.set_defaults(func=cmd_chat)

@@ -153,6 +153,53 @@ async def _async_readonly_enforcer(request: ToolCallRequest, handler: Any):
 readonly_enforcer = dual(_sync_readonly_enforcer, _async_readonly_enforcer, name="readonly_enforcer")
 
 
+# ---------------------------------------------------------------------------
+# on-failure 审批档：写工具失败后，不再让模型自己绕路，标记需人工复核
+# ---------------------------------------------------------------------------
+# 为什么需要它：默认行为是「工具失败 → 转成 ToolMessage → 模型换个参数重试」。
+# 对只读工具这很合理，但**写工具**重试是有副作用的（可能写了半份文件、重复落盘）。
+# on-failure 档的语义就是：写操作一旦失败，交回人来拍板。
+def _sync_failure_escalation(request: ToolCallRequest, handler: Any) -> Any:
+    result = handler(request)
+    name = request.tool_call.get("name", "")
+    is_error = getattr(result, "status", None) == "error"
+    if is_error and name in DANGEROUS_TOOL_NAMES:
+        original = getattr(result, "content", "") or ""
+        log.warning("[on-failure] 写工具 %s 执行失败，已标记需人工复核", name)
+        return ToolMessage(
+            content=(
+                f"{original}\n\n[on-failure 策略] 这是写操作，失败后不再自动重试，"
+                f"已标记**需人工复核**；请向用户说明失败原因并等待确认，不要换个参数继续写。"
+            ),
+            tool_call_id=request.tool_call.get("id"),
+            status="error",
+        )
+    return result
+
+
+async def _async_failure_escalation(request: ToolCallRequest, handler: Any) -> Any:
+    result = await handler(request)
+    name = request.tool_call.get("name", "")
+    is_error = getattr(result, "status", None) == "error"
+    if is_error and name in DANGEROUS_TOOL_NAMES:
+        original = getattr(result, "content", "") or ""
+        log.warning("[on-failure] 写工具 %s 执行失败，已标记需人工复核", name)
+        return ToolMessage(
+            content=(
+                f"{original}\n\n[on-failure 策略] 这是写操作，失败后不再自动重试，"
+                f"已标记**需人工复核**；请向用户说明失败原因并等待确认，不要换个参数继续写。"
+            ),
+            tool_call_id=request.tool_call.get("id"),
+            status="error",
+        )
+    return result
+
+
+failure_escalation = dual(
+    _sync_failure_escalation, _async_failure_escalation, name="failure_escalation"
+)
+
+
 # =============================================================================
 # A. 内置中间件组装
 # =============================================================================
@@ -165,6 +212,7 @@ def build_middleware_stack(
     message_window: int | None = None,
     enable_goal_anchor: bool = True,
     budget: dict | None = None,
+    escalate_on_failure: bool = False,
 ) -> list[AgentMiddleware]:
     """按职责顺序装配中间件。
 
@@ -184,8 +232,11 @@ def build_middleware_stack(
 
     enable_goal_anchor / budget 来自 agent_kit/guards.py（Multi-Agent 防护）：
       · goal_anchor 默认开启——state 里没有 original_goal 时自动跳过，对现有模式无副作用；
-      · budget 默认关闭（None），多智能体长任务场景建议显式传入
+      ·     budget 默认关闭（None），多智能体长任务场景建议显式传入
         {"max_model_calls": 12, "max_seconds": 120}。
+
+    escalate_on_failure 来自 agent_kit/policy.py 的 `on-failure` 档：
+    写工具失败后把错误信息升级成「需人工复核」，阻止模型自己换个参数继续写。
     """
     stack: list[AgentMiddleware] = []
 
@@ -194,6 +245,11 @@ def build_middleware_stack(
         from agent_kit.guards import make_budget_guard
 
         stack.append(make_budget_guard(**budget))
+
+    # ---- 0.5 失败升级（on-failure 档）：必须排在 error_handler 之外，
+    #          才能看到它转换出来的 ToolMessage(status="error") --------------
+    if escalate_on_failure:
+        stack.append(failure_escalation)
 
     stack.extend(
         [
