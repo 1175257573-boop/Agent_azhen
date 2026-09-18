@@ -51,12 +51,15 @@ HELP = """\
 class ChatSession:
     """一次终端会话的状态与循环。"""
 
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, source: str = "cli") -> None:
         self.cfg = cfg
         self.app = None
         self.streaming = True
         self._loop: Any = None
         self._pending: list[Any] = []
+        # 流水来源：REPL 是 cli，单次 --ask 是 chat，两者都算交互会话（记忆 Phase 1 只抽这两类）；
+        # sub-agent / 工具会话反映的只是 agent 内部调度，不该被当成长久记忆
+        self.source = source
 
     # ------------------------------------------------------------ 事件循环
     @property
@@ -247,6 +250,7 @@ class ChatSession:
                 self.app.graph,
                 self.app.config.thread_id,
                 config=self.app.thread_config,
+                source=self.source,
             )
         except Exception as exc:  # noqa: BLE001
             log.debug("会话流水落盘失败（已忽略）：%s: %s", type(exc).__name__, exc)

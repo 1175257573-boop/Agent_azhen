@@ -459,6 +459,38 @@ git -C ~/.atlas/memories log --oneline      # 看每次合并的轨迹
 
 git 不在 PATH 里时会明确写进运行报告的 `说明` 行并退回全量重写，不静默假装成功。
 
+#### Phase 1 的后台编排：`agent_kit/memory_jobs.py`
+
+上面的两段管线是「手动跑一次」的形态；Codex 的真实做法是**会话启动后在后台自动跑**：
+每次受理有上限、会话要满足一堆门槛、多条并行。这一层补齐这些规则：
+
+```bash
+python main.py memories --background            # 后台线程跑（含资格筛选 + 并行）
+python main.py memories --background --wait 30  # 最多等 30 秒看结果
+```
+
+| Codex 的门槛 | 默认值 | 环境变量 |
+|---|---|---|
+| 每次受理上限（bounded work per startup） | 5 条 | `ATLAS_MEMORY_MAX_JOBS` |
+| 回溯时间窗（age window） | 7 天 | `ATLAS_MEMORY_MAX_AGE_DAYS` |
+| 会话需空闲多久才抽 | 30 分钟 | `ATLAS_MEMORY_IDLE_MINUTES` |
+| 允许的会话来源 | `cli,chat` | `ATLAS_MEMORY_SOURCES` |
+| 并行并发上限 | 3 | `ATLAS_MEMORY_CONCURRENCY` |
+
+三条值得单独说的设计：
+
+1. **排除 sub-agent / 工具会话**。Multi-agent 里 router / subagent 的流水反映的是
+   agent 内部调度，抽进长期记忆等于把一次临时的任务分派当成用户偏好记下来。
+   为此 `rollout` 表加了 `source` 列（带幂等迁移），`ChatSession(source=...)` 区分 REPL 与单次问答。
+2. **空闲门槛是必要的**。没有它，正在进行的对话会被截成一份「最终结论」写进 MEMORY.md，
+   而那个「结论」在会话结束前根本不成立。
+3. **落盘前脱敏**（`redact_secrets()`）。用户随口粘贴的 Key 会跟着对话进 `raw_memory`，
+   而记忆是要长期留存、还会进 git 基线仓库的 —— 那就是凭据泄漏。只抹形状极像密钥的模式，
+   **宁可漏也不要把正常文本改坏**（有测试兜着）。
+
+另外加了一种 Codex 有、我们原先没有的结局：**本次会话没有可记忆内容**
+（Codex 叫 `succeeded_no_output`）——跑完了但确实没东西好记，如实跳过，**不拿模板补一条**。
+
 ### 起服务
 
 推荐直接用容器，`docker-compose.yml` 里已经配好了两个服务：

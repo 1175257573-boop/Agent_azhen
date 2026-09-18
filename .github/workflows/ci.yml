@@ -80,6 +80,12 @@ jobs:
       - name: 语义检索演示（字面匹配 vs 语义检索，离线降级路径）
         run: python main.py retrievers
 
+      # 记忆管线的后台编排路径：没有 Key 时应当明确跳过而不是报错或编造
+      - name: 记忆后台编排（Codex 形态 startup claim）
+        env:
+          ATLAS_HOME: ${{ runner.temp }}/atlas-ci
+        run: python main.py memories --background --wait 20
+
       - name: MCP Server 协议连通（4 个 server / 21 个工具）
         run: python examples/mcp_servers_demo.py
 

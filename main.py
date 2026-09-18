@@ -63,7 +63,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
         enable_mcp=args.mcp,
     )
     try:
-        session = ChatSession(cfg)
+        session = ChatSession(cfg, source="chat" if args.ask else "cli")
         session.load()
     except RuntimeError as exc:
         print(f"[配置错误] {exc}")
@@ -198,6 +198,19 @@ def cmd_memories(args: argparse.Namespace) -> int:
             force=args.force,
         )
         print(report.to_text())
+        return 0
+
+    if args.background:
+        # Codex 形态：后台线程跑（含资格筛选 + 并行），本进程不等它
+        from agent_kit import memory_jobs
+
+        worker, bag = memory_jobs.spawn(phase2=not args.no_bg_phase2)
+        print(f"已在后台启动记忆管线（{memory_jobs.Eligibility.from_env().describe()}）")
+        worker.join(timeout=args.wait)
+        if bag["done"].is_set():
+            print((bag.get("report") or memory_jobs.PipelineReport()).to_text())
+        else:
+            print(f"（{args.wait} 秒内未跑完，任务仍在后台；进程退出时会被丢弃）")
         return 0
 
     phase = args.phase
@@ -392,6 +405,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_mem.add_argument("--thread", help="只抽取这一个会话")
     p_mem.add_argument("--force", action="store_true", help="强制重抽：忽略「流水没变就跳过」和已完成状态")
     p_mem.add_argument("--no-git", action="store_true", help="Phase2 不用 git 基线 diff，退回全量重写")
+    p_mem.add_argument("--background", action="store_true", help="Codex 形态：后台线程跑记忆管线（含资格筛选与并行）")
+    p_mem.add_argument("--wait", type=int, default=0, help="配合 --background：最多等多少秒")
+    p_mem.add_argument("--no-bg-phase2", action="store_true", help="配套后台模式：本轮不接着跑 Phase2")
     p_mem.set_defaults(func=cmd_memories)
 
     p_sess = sub.add_parser("sessions", parents=[common], help="会话流水（rollout）：列会话 / 回放 / 导出")

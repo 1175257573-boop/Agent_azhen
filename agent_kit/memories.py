@@ -554,11 +554,17 @@ def run_phase1(
             release(thread_id, owner, db_path=db_path)
             report.skipped.append((thread_id, "模型未返回结构化结果"))
             continue
+        if not result.raw_memory.strip() or result.raw_memory.strip() in _EMPTY_MEMORY_MARKERS:
+            # Codex 管这叫 succeeded_no_output：跑完了，只是这次会话确实没东西值得记。
+            # **不能拿模板编一条出来**，也不算失败（不该进退避）
+            release(thread_id, owner, db_path=db_path)
+            report.skipped.append((thread_id, "本次会话没有可记忆内容"))
+            continue
         save(
             MemoryRecord(
                 thread_id=thread_id,
-                raw_memory=result.raw_memory,
-                summary=result.rollout_summary,
+                raw_memory=_redact(result.raw_memory),
+                summary=_redact(result.rollout_summary),
                 slug=result.rollout_slug or "",
                 generated_at=_now_iso(),
             ),
@@ -568,6 +574,21 @@ def run_phase1(
         mark_done(thread_id, owner, digest, db_path=db_path)
         report.succeeded.append(thread_id)
     return report
+
+
+# 模型在「没什么可记」时的常见说法。注意这是**识别为空结果**用的白名单，
+# 不是拿来生成内容的模板——匹配上就跳过，绝不反过来套用。
+_EMPTY_MEMORY_MARKERS = frozenset({"本次无可记忆内容", "无", "无可记忆内容", "（无）", "N/A", "none"})
+
+
+def _redact(text: str) -> str:
+    """记忆要长期留存还会进 git，落盘前把像密钥的片段抹掉。"""
+    try:
+        from agent_kit.memory_jobs import redact_secrets
+
+        return redact_secrets(text)
+    except Exception:  # noqa: BLE001 - 脱敏失败不能让整轮抽取挂掉
+        return text
 
 
 def _busy_reason(holder: Lease | None, digest: str | None = None) -> str:

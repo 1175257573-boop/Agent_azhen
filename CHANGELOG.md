@@ -79,6 +79,27 @@
 - 测试 159 → **183**（`test_memory_lease.py` 14 / `test_memory_git.py` 10）。
   含 8 线程抢同一把锁必须恰好一个赢家、多进程端到端（4 进程 5 会话零重复）两轮验证。
 
+### 新增（Codex 模板第四批：Phase 1 后台编排 + startup claim）
+
+取证依据：`codex-rs/memories/README.md`（官方仓库原文）。原先只做到了
+「单条怎么抽 + lease 互斥」，缺的是 Codex 那一整套**受理规则与后台执行**。
+
+- 新增 `agent_kit/memory_jobs.py`：
+  · `Eligibility` —— 每次受理上限 5 条 / 7 天时间窗 / 会话需空闲 30 分钟 /
+    只收交互会话 / 并发上限 3，全部可用环境变量覆盖（值非法则忽略该字段回落默认）；
+  · `select_eligible()` 做粗筛，`run_pipeline()` 用线程池受限并行，`spawn()` 起守护线程
+    （对标 Codex「会话启动后异步跑 Phase 1 再接 Phase 2」）；
+  · `redact_secrets()` —— 记忆长期留存且会进 git 基线仓库，落盘前抹掉形状像密钥的片段。
+    原则写在注释里：**宁可漏，不可把正常文本改坏**（有测试兜着）。
+- `rollout` 表加 `source` 列 **并做幂等迁移**（老库 `CREATE TABLE IF NOT EXISTS` 是空操作，
+  漏了 ALTER 会在 select 时抛 no such column）。`ChatSession(source=...)` 区分 REPL 与单次问答。
+  排除 sub-agent / 工具会话：它们的流水是 agent 内部调度，不该被当成用户长期记忆。
+- `memories.run_phase1()` 增加第三种结局（对标 Codex 的 `succeeded_no_output`）：
+  模型说「本次无可记忆内容」时如实跳过，**不拿模板补一条**，也不算失败进退避。
+- `memories` 命令新增 `--background` / `--wait` / `--no-bg-phase2`；CI 冒烟加了这条路径
+  （在 Linux 上验证「没 Key 时应明确跳过而不是报错或编造」）。
+- 测试 183 → **200**（`test_memory_jobs.py` 17）。
+
 ### 新增
 
 - **Agent 效果评估 `agent_kit/evalset.py` + CLI `main.py eval`**：补上「单元测试证明不了

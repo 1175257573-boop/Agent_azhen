@@ -10,6 +10,10 @@ Codex 每会话一个 JSONL 文件，本项目既然已经有一个 SQLite 家�
 所以 `sync_from_checkpoint()` 是**增量同步**：比对已有条数，只补新的。
 
 表的落点与短期记忆同一个库文件（ATLAS_HOME/atlas.db），表名不同。
+
+`source` 标记这条流水来自哪类会话：**memory Phase 1 只抽交互会话**（cli / chat），
+sub-agent 与工具内部会话排除在外——它们反映的是agent内部的调度过程，
+抽进用户长期记忆等于把临时的任务分派当成用户偏好记下来（Codex 同样按 session source 过滤）。
 """
 
 from __future__ import annotations
@@ -25,6 +29,16 @@ from agent_kit.home import resolve_db_path
 
 _TABLE = "rollout"
 
+DEFAULT_SOURCE = "cli"
+
+# 会话来源：哪些能进长期记忆，哪些不能
+SOURCE_CLI = "cli"              # REPL 交互
+SOURCE_CHAT = "chat"            # 单次问答
+SOURCE_SUBAGENT = "subagent"    # 子代理会话
+SOURCE_TOOL = "tool"            # 工具 / 路由内部会话
+INTERACTIVE_SOURCES = (SOURCE_CLI, SOURCE_CHAT)
+ALL_SOURCES = INTERACTIVE_SOURCES + (SOURCE_SUBAGENT, SOURCE_TOOL)
+
 _DDL = f"""
 CREATE TABLE IF NOT EXISTS {_TABLE} (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,10 +47,15 @@ CREATE TABLE IF NOT EXISTS {_TABLE} (
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
     tool_name  TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT '{DEFAULT_SOURCE}'
 );
 CREATE INDEX IF NOT EXISTS idx_rollout_thread ON {_TABLE}(thread_id, seq);
 """
+
+# 老库没有 source 列；ALTER 的 DEFAULT 值没法用占位符绑定，所以用模块常量拼进 SQL。
+# 这里不存在注入风险：DEFAULT_SOURCE 是本模块里的常量。
+_ADD_SOURCE_COLUMN = f"ALTER TABLE {_TABLE} ADD COLUMN source TEXT NOT NULL DEFAULT '{DEFAULT_SOURCE}'"
 
 
 def _now_iso() -> str:
@@ -49,7 +68,20 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(_DDL)
+    _ensure_source_column(conn)
     return conn
+
+
+def _ensure_source_column(conn: sqlite3.Connection) -> None:
+    """幂等迁移：给没有 source 列的老库补上。
+
+    旧版已经落过流水，`CREATE TABLE IF NOT EXISTS` 对它们是空操作，
+    所以必须单独加列——漏这一步会在 select 时抛 no such column。
+    """
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({_TABLE})")}
+    if "source" not in columns:
+        conn.execute(_ADD_SOURCE_COLUMN)
+        conn.commit()
 
 
 def _text_of(content: Any) -> str:
@@ -78,8 +110,10 @@ def append(
     messages: Iterable[Any],
     *,
     db_path: str | Path | None = None,
+    source: str = DEFAULT_SOURCE,
 ) -> int:
     """追加一批消息，返回实际写入条数。"""
+    origin = source if source in ALL_SOURCES else DEFAULT_SOURCE
     conn = _connect(db_path)
     try:
         row = conn.execute(f"SELECT COUNT(*) AS n FROM {_TABLE} WHERE thread_id = ?", (thread_id,)).fetchone()
@@ -88,8 +122,8 @@ def append(
         written = 0
         for message in messages:
             conn.execute(
-                f"INSERT INTO {_TABLE} (thread_id, seq, role, content, tool_name, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {_TABLE} (thread_id, seq, role, content, tool_name, created_at, source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     thread_id,
                     seq,
@@ -97,6 +131,7 @@ def append(
                     _text_of(getattr(message, "content", "")),
                     getattr(message, "name", None),
                     now,
+                    origin,
                 ),
             )
             seq += 1
@@ -113,6 +148,7 @@ def sync_from_checkpoint(
     *,
     config: dict | None = None,
     db_path: str | Path | None = None,
+    source: str = DEFAULT_SOURCE,
 ) -> int:
     """从 checkpointer 增量同步会话流水。**这是推荐的写入方式**。
 
@@ -136,23 +172,48 @@ def sync_from_checkpoint(
 
     if existing >= len(messages):
         return 0  # 没有新增（或状态被裁剪过，保守跳过）
-    return append(thread_id, messages[existing:], db_path=db_path)
+    return append(thread_id, messages[existing:], db_path=db_path, source=source)
 
 
-def list_sessions(*, limit: int = 20, db_path: str | Path | None = None) -> list[dict[str, Any]]:
-    """列出最近有流水的会话：thread_id / 条数 / 最后一条时间。"""
+def list_sessions(
+    *,
+    limit: int = 20,
+    sources: Iterable[str] | None = None,
+    db_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """列出最近有流水的会话：thread_id / 条数 / 最后一条时间。
+
+    Args:
+        sources: 限定会话来源；None 表示不限。多个来源之间是「或」的关系。
+    """
     conn = _connect(db_path)
     try:
+        where = ""
+        params: list[Any] = []
+        if sources is not None:
+            wanted = [s for s in sources]
+            if not wanted:
+                return []       # 空集合：谁都不匹配，别退化成「不限」
+            placeholders = ",".join("?" for _ in wanted)
+            where = f"WHERE source IN ({placeholders})"
+            params.extend(wanted)
         rows = conn.execute(
             f"""SELECT thread_id,
+                       MIN(source) AS source,
                        COUNT(*) AS turns,
                        MAX(created_at) AS last_at
-                FROM {_TABLE} GROUP BY thread_id
+                FROM {_TABLE} {where} GROUP BY thread_id
                 ORDER BY last_at DESC LIMIT ?""",
-            (limit,),
+            (*params, limit),
         ).fetchall()
         return [
-            {"thread_id": r["thread_id"], "turns": r["turns"], "last_at": r["last_at"]} for r in rows
+            {
+                "thread_id": r["thread_id"],
+                "source": r["source"],
+                "turns": r["turns"],
+                "last_at": r["last_at"],
+            }
+            for r in rows
         ]
     finally:
         conn.close()
