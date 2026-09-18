@@ -26,10 +26,16 @@ Windows 持久化写法（重启终端后依然有效）：
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+from agent_kit.home import atlas_home
+from agent_kit.logging_conf import get_logger
 
 
 def _load_dotenv_once() -> None:
@@ -49,6 +55,8 @@ def _load_dotenv_once() -> None:
 
 
 _load_dotenv_once()
+
+log = get_logger("agent.config")
 
 DEFAULT_MODELS: dict[str, str] = {
     "fake": "scripted",
@@ -111,7 +119,11 @@ class AgentSettings:
     优先级：显式传参 > 环境变量 > 代码默认值。
     """
 
-    provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER") or detect_provider())
+    provider: str = field(
+        default_factory=lambda: os.getenv("LLM_PROVIDER")
+        or load_atlas_config().model_provider
+        or detect_provider()
+    )
     model_name: str = ""
     temperature: float = 0.2
     max_tokens: int = 2048
@@ -130,7 +142,9 @@ class AgentSettings:
         if self.provider not in DEFAULT_MODELS:
             raise ValueError(f"未知 provider：{self.provider}，可选 {list(DEFAULT_MODELS)}")
         if not self.model_name:
-            self.model_name = os.getenv("LLM_MODEL") or DEFAULT_MODELS[self.provider]
+            self.model_name = (
+                os.getenv("LLM_MODEL") or load_atlas_config().model or DEFAULT_MODELS[self.provider]
+            )
 
     @property
     def sandbox_dir(self) -> Path:
@@ -215,6 +229,140 @@ def detect_provider() -> str:
         if get_api_key(provider):
             return provider
     return "fake"
+
+
+# ---------------------------------------------------------------------------
+# TOML 配置层（对标 Codex 的 config.toml + config-schema）
+# ---------------------------------------------------------------------------
+# 为什么还要一层 TOML：环境变量适合放密钥（不落盘），但不适合放「一改就是一组」的
+# 运行参数——记忆后端、检索器、审批策略这些，写在文件里能进版本库、能评审、能复现。
+# 分工照旧：**密钥只走环境变量**，TOML 里出现类密钥字段会直接报校验错。
+#
+# 优先级：**环境变量 > 项目根 atlas.toml > ATLAS_HOME/atlas.toml > 代码默认值**。
+# 环境变量仍然最高，保证已有用法不被破坏。
+#
+# 示例 atlas.toml：
+#     model = "qwen-plus"
+#     model_provider = "dashscope"
+#     [memory]
+#     short_term = "sqlite"
+#     long_term = "sqlite"
+#     [retrieval]
+#     name = "keyword"
+#     [approval_policy]
+#     value = "on-failure"
+#     [sandbox]
+#     mode = "workspace-write"
+
+CONFIG_FILENAME = "atlas.toml"
+
+# 类密钥字段名：出现在 TOML 里直接拒绝，避免把密钥写进版本库
+_FORBIDDEN_KEYS = ("api_key", "token", "secret", "password")
+
+
+def _load_toml_module() -> Any:
+    """TOML 解析器：3.11+ 用标准库 tomllib，低版本回落到 tomli（可选依赖）。"""
+    import sys
+
+    if sys.version_info >= (3, 11):
+        import tomllib
+
+        return tomllib
+    try:
+        import tomli  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - 取决于环境
+        raise RuntimeError(
+            "Python 3.10 及以下读取 atlas.toml 需要 tomli：pip install tomli>=2.0"
+        ) from exc
+    return tomli
+
+
+def config_search_paths() -> list[Path]:
+    """配置文件搜索顺序：**项目根**在前（项目级覆盖用户级），家目录在后。"""
+    project_root = Path(__file__).resolve().parent.parent
+    return [project_root / CONFIG_FILENAME, atlas_home() / CONFIG_FILENAME]
+
+
+def _load_toml() -> tuple[dict[str, Any], Path | None]:
+    """读第一个存在的配置文件。全部不存在时返回空字典（走默认值）。"""
+    for path in config_search_paths():
+        if not path.is_file():
+            continue
+        module = _load_toml_module()
+        try:
+            with path.open("rb") as fh:
+                return module.load(fh), path
+        except (OSError, ValueError) as exc:
+            log.warning("配置文件 %s 解析失败，已忽略：%s", path, exc)
+            continue
+    return {}, None
+
+
+class MemoryConfig(BaseModel):
+    """记忆后端配置。默认 sqlite——标准库自带、零配置、重启不丢。"""
+
+    short_term: Literal["memory", "sqlite", "redis"] = "sqlite"
+    long_term: Literal["memory", "sqlite", "postgres"] = "sqlite"
+
+
+class RetrievalConfig(BaseModel):
+    """检索器配置。`name` 指的是检索器注册表里注册过的名字。"""
+
+    name: str = "keyword"
+
+
+class ApprovalConfig(BaseModel):
+    """写操作/敏感操作的审批档位（对标 Codex 的 approval_policy）。"""
+
+    value: Literal["untrusted", "on-failure", "never"] = "on-failure"
+
+
+class SandboxConfig(BaseModel):
+    """写文件的作用域档位。映射到项目内已有的 role 权限体系。"""
+
+    mode: Literal["read-only", "workspace-write", "danger-full-access"] = "workspace-write"
+
+
+class AtlasConfig(BaseModel):
+    """atlas.toml 的完整 schema。字段缺失即取默认值，多余字段会报错（早失败优于静默）。"""
+
+    model_config = {"extra": "forbid"}
+
+    model: str | None = None
+    model_provider: str | None = None
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    approval_policy: ApprovalConfig = Field(default_factory=ApprovalConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_secrets(cls, data: Any) -> Any:
+        """密钥只能走环境变量。TOML 里出现类密钥字段直接拒绝。"""
+        if isinstance(data, dict):
+            flat = json.dumps(data, ensure_ascii=False).lower()
+            for bad in _FORBIDDEN_KEYS:
+                if f'"{bad}"' in flat:
+                    raise ValueError(f"atlas.toml 不允许出现密钥字段 {bad!r}，请改用环境变量")
+        return data
+
+
+_CACHE: dict[str, Any] = {}
+
+
+def load_atlas_config(*, reload: bool = False) -> AtlasConfig:
+    """加载 atlas.toml（带缓存）。校验失败时**降级为默认配置并告警**，不让启动挂掉。"""
+    if not reload and "cfg" in _CACHE:
+        return _CACHE["cfg"]
+    raw, path = _load_toml()
+    try:
+        cfg = AtlasConfig.model_validate(raw)
+    except Exception as exc:  # noqa: BLE001 - 配置错误要兜住，不能让整个 CLI 起不来
+        log.warning("atlas.toml 校验失败，已回退默认配置：%s", exc)
+        cfg = AtlasConfig()
+    log.debug("配置来源：%s", path or "未找到 atlas.toml，使用默认配置")
+    _CACHE["cfg"] = cfg
+    return cfg
 
 
 def require_api_key(settings: AgentSettings) -> None:

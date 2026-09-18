@@ -12,9 +12,12 @@
       本项目用 **PostgreSQL** 存（需要落盘、可 SQL 查询、能跨服务共享）。
       无 PG 时自动降级为 InMemoryStore。
 
-环境变量（全部可选，不配就走内存降级）：
-    SHORT_TERM_BACKEND   memory | sqlite | redis       默认：配了 REDIS_URL 就 redis
-    LONG_TERM_BACKEND    memory | sqlite | postgres    默认：配了 PG_DSN 就 postgres
+环境变量（全部可选）：
+    SHORT_TERM_BACKEND   memory | sqlite | redis       默认 sqlite（配了 REDIS_URL 则 redis）
+    LONG_TERM_BACKEND    memory | sqlite | postgres    默认 sqlite（配了 PG_DSN 则 postgres）
+    ATLAS_HOME          运行态家目录，默认 ~/.atlas；SQLite 库落在这里
+    SQLITE_PATH         直接指定 SQLite 库文件路径（优先级高于 ATLAS_HOME）
+    MEMORY_STRICT       1 = 后端连不上直接报错；0（默认）= 告警并降级内存
     REDIS_URL            redis://localhost:6379/0
     REDIS_TTL_MINUTES    checkpoint 过期分钟数，默认 10080（7 天）
     MEMORY_WINDOW        短期记忆消息窗口大小，默认 20 条
@@ -36,6 +39,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
+from agent_kit.config import load_atlas_config
+from agent_kit.home import resolve_db_path
 from agent_kit.logging_conf import get_logger
 
 log = get_logger("agent.memory")
@@ -89,14 +94,31 @@ def default_dir() -> Path:
 
 
 def short_backend() -> str:
-    """短期记忆后端：显式配置 > 有 REDIS_URL > 内存。"""
-    return (os.getenv("SHORT_TERM_BACKEND") or "").lower() or ("redis" if _dsn("REDIS_URL") else "memory")
+    """短期记忆后端：环境变量 > atlas.toml > **默认 sqlite**。
+
+    默认改成 sqlite 的原因：Redis/PostgreSQL 都要另起服务，本机跑一次 demo 就得装；
+    而 SQLite 标准库自带、零配置、进程重启不丢。要换回 Redis，设 SHORT_TERM_BACKEND=redis
+    或在 atlas.toml 里写 `[memory] short_term = "redis"`。
+    """
+    env = (os.getenv("SHORT_TERM_BACKEND") or "").lower()
+    if env:
+        return env
+    toml_value = (load_atlas_config().memory.short_term or "").lower()
+    if toml_value:
+        return toml_value
+    return "redis" if _dsn("REDIS_URL") else "sqlite"
 
 
 def long_backend() -> str:
-    """长期记忆后端：显式配置 > 有 PG_DSN > 内存。"""
+    """长期记忆后端：环境变量 > atlas.toml > **默认 sqlite**（理由同上）。"""
+    env = (os.getenv("LONG_TERM_BACKEND") or "").lower()
+    if env:
+        return env
+    toml_value = (load_atlas_config().memory.long_term or "").lower()
+    if toml_value:
+        return toml_value
     has_pg = bool(_dsn("PG_DSN", "POSTGRES_URL", "DATABASE_URL"))
-    return (os.getenv("LONG_TERM_BACKEND") or "").lower() or ("postgres" if has_pg else "memory")
+    return "postgres" if has_pg else "sqlite"
 
 
 def window_size() -> int:
@@ -155,9 +177,9 @@ def build_checkpointer(mode: str | None = None) -> Any:
         try:
             from langgraph.checkpoint.sqlite import SqliteSaver
 
-            db_path = Path(os.getenv("SQLITE_PATH") or (default_dir() / "checkpoints.sqlite"))
+            db_path = resolve_db_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            RESOLVED["short"] = "sqlite"
+            RESOLVED["short"] = f"sqlite[{db_path.name}]"
             return SqliteSaver.from_conn_string(str(db_path))
         except Exception as exc:  # noqa: BLE001
             _degrade("短期记忆", "sqlite", exc)
@@ -279,12 +301,16 @@ def build_store(mode: str | None = None) -> BaseStore:
 
     if mode == "sqlite":
         try:
-            from langgraph.store.sqlite import SqliteStore
+            # 官方没有 SQLite 版 store（详见 sqlite_store.py 的模块说明），用自建实现
+            from agent_kit.sqlite_store import SqliteStore
 
-            db_path = Path(os.getenv("SQLITE_PATH") or (default_dir() / "store.sqlite"))
+            db_path = resolve_db_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            RESOLVED["long"] = "sqlite"
-            return SqliteStore.from_conn_string(str(db_path))
+            store = SqliteStore(db_path)
+            atexit.register(_close_quietly, store)
+            RESOLVED["long"] = f"sqlite[{db_path.name}]"
+            log.info("长期记忆 → SQLite %s", db_path)
+            return store
         except Exception as exc:  # noqa: BLE001
             _degrade("长期记忆", "sqlite", exc)
 
