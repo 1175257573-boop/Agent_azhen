@@ -35,8 +35,27 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$", re.MULTILINE)
 ANCHOR_RE = re.compile(r"<a\s+id=\"([^\"]+)\"", re.IGNORECASE)
 LINK_RE = re.compile(r"\[[^\]]+\]\(#([^)]+)\)")
 
-# 对外公开项目应有的门面文件
-EXPECTED_FILES = ["README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", ".gitignore", ".github/workflows"]
+# 对外公开项目应有的门面文件。**每一项都给出常见别名**：
+# 只认 `LICENSE` 会把 `LICENSE.txt` 判成缺失（click 就是这样被误报的），
+# 只认 `CHANGELOG.md` 会漏掉 `CHANGES.md`。别名不全 = 好项目被评差。
+EXPECTED_FILES: dict[str, tuple[str, ...]] = {
+    "README.md": ("README.md", "README.rst", "README.txt"),
+    "LICENSE": ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.txt"),
+    "CHANGELOG.md": ("CHANGELOG.md", "CHANGES.md", "HISTORY.md"),
+    "CONTRIBUTING.md": ("CONTRIBUTING.md", "CONTRIBUTING.rst", "CONTRIBUTING.txt"),
+    "SECURITY.md": ("SECURITY.md", "SECURITY.rst"),
+    ".gitignore": (".gitignore",),
+    ".github/workflows": (".github/workflows", ".gitlab-ci.yml", "azure-pipelines.yml"),
+}
+
+
+def _exists_any(root, names: tuple[str, ...]) -> bool:
+    """任一个别名存在就算有；大小写不敏感（Windows 常见 License.txt）。"""
+    for name in names:
+        if (root / name).exists():
+            return True
+    lowered = {p.name.lower(): p for p in root.iterdir()} if root.is_dir() else {}
+    return any(name.lower() in lowered for name in names)
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +125,13 @@ def changelog_status(subdir: str = ".") -> dict:
         subdir: 相对项目根目录的子目录
     """
     root = resolve_dir(subdir)
-    path = root / "CHANGELOG.md"
-    if not path.exists():
-        return {"found": False, "message": "未找到 CHANGELOG.md"}
+    # 与 project_checklist 用同一套别名：否则这里说「未找到 CHANGELOG.md」、
+    # 那边却因为 CHANGES.md 判成已存在，两个工具口径打架，
+    # 模型会照样把矛盾写进报告（评 pallets/click 时就是这样被抓出来的）
+    aliases = EXPECTED_FILES["CHANGELOG.md"]
+    path = next((root / name for name in aliases if (root / name).exists()), None)
+    if path is None:
+        return {"found": False, "message": f"未找到 {' / '.join(aliases)}"}
 
     text = path.read_text(encoding="utf-8", errors="ignore")
     versions = re.findall(r"^##\s+\[([^\]]+)\]", text, re.MULTILINE)
@@ -135,11 +158,12 @@ def project_checklist(subdir: str = ".") -> dict:
         subdir: 相对项目根目录的子目录
     """
     root = resolve_dir(subdir)
-    missing = [name for name in EXPECTED_FILES if not (root / name).exists()]
+    present = [name for name, aliases in EXPECTED_FILES.items() if _exists_any(root, aliases)]
+    missing = [name for name in EXPECTED_FILES if name not in present]
     return {
         "root": root.name,
-        "expected": EXPECTED_FILES,
-        "present": [name for name in EXPECTED_FILES if (root / name).exists()],
+        "expected": list(EXPECTED_FILES),
+        "present": present,
         "missing": missing,
         "verdict": "齐全" if not missing else f"缺少 {len(missing)} 项：{', '.join(missing)}",
     }

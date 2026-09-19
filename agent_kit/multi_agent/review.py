@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field
 
 from agent_kit.logging_conf import get_logger
 from agent_kit.mcp_servers import doc_audit, git_history, quality
-from agent_kit.mcp_servers._common import reset_root, set_root
+from agent_kit.mcp_servers._common import _normalize_root, reset_root, set_root
 from agent_kit.multi_agent.fanout import TaskResult, TaskSpec, detect_conflicts, run_fanout
 
 log = get_logger("agent.review")
@@ -296,8 +296,12 @@ def rule_based_findings(evidence: dict[str, dict]) -> list[Finding]:
     让模型去「判断」一遍，只是花钱买一次幻觉的机会。
     这类结论天然带证据，成本为零，而且没有模型时也能出。
 
-    只挑**判定边界清晰**的三类（有没有测试、依赖钉没钉版本、有没有疑似密钥）；
+    覆盖四类（有没有测试、依赖钉没钉版本、有无疑似密钥、交付清单齐不齐）；
     像「分层是否合理」这种必须读代码才能说的，仍然留给模型或人工。
+
+    ⚠️ **规则也要能判「良好」**，不能只报问题：
+    只报问题的规则会让一个好项目被评为「八项全未覆盖」——
+    明明查了且没问题，读起来却像没查。这和「未发现问题」一样危险，方向相反而已。
     """
 
     def _data(name: str) -> dict | None:
@@ -307,16 +311,23 @@ def rule_based_findings(evidence: dict[str, dict]) -> list[Finding]:
     findings: list[Finding] = []
 
     tests = _data("check_tests")
-    if tests and not tests.get("has_tests_dir"):
-        findings.append(Finding(
-            dimension="tests", verdict=BLOCKER,
-            fact="没有 tests 目录，也没有任何测试用例",
-            evidence=f"check_tests: has_tests_dir=false, test_cases={tests.get('test_cases', 0)}",
-            suggestion="至少补一条冒烟用例，钉住「能跑起来」这条底线",
-        ))
+    if tests:
+        if not tests.get("has_tests_dir"):
+            findings.append(Finding(
+                dimension="tests", verdict=BLOCKER,
+                fact="没有 tests 目录，也没有任何测试用例",
+                evidence=f"check_tests: has_tests_dir=false, test_cases={tests.get('test_cases', 0)}",
+                suggestion="至少补一条冒烟用例，钉住「能跑起来」这条底线",
+            ))
+        elif tests.get("test_cases", 0) > 0:
+            findings.append(Finding(
+                dimension="tests", verdict=GOOD,
+                fact=f"有 tests 目录，共 {tests['test_cases']} 个用例 / {tests.get('test_files', 0)} 个文件",
+                evidence=f"check_tests: has_tests_dir=true, test_cases={tests['test_cases']}",
+            ))
 
     deps = _data("dependency_audit")
-    if deps:
+    if deps and deps.get("found"):
         unpinned = deps.get("unpinned") or []
         if unpinned:
             findings.append(Finding(
@@ -325,19 +336,81 @@ def rule_based_findings(evidence: dict[str, dict]) -> list[Finding]:
                 evidence=f"dependency_audit: unpinned={unpinned[:5]}",
                 suggestion="钉到具体版本，或用 lock 文件",
             ))
+        else:
+            findings.append(Finding(
+                dimension="deps", verdict=GOOD,
+                fact="requirements.txt 里的依赖全部钉住版本",
+                evidence=f"dependency_audit: pinned={deps.get('pinned')}, unpinned=[]",
+            ))
+        # 没有 requirements.txt（改用 pyproject / Poetry 等）时不判——
+        # 判「没有依赖声明」是错的，只是声明方式不同
 
     secrets = _data("scan_secrets")
-    if secrets and secrets.get("count"):
-        hits = secrets.get("hits") or []
-        where = "、".join(f"{h.get('file')}:{h.get('line')}" for h in hits[:3])
-        findings.append(Finding(
-            dimension="config", verdict=BLOCKER,
-            fact=f"疑似硬编码密钥 {secrets['count']} 处（命中 ≠ 泄密，示例值与占位符已剔除，仍需人工复核）",
-            evidence=f"scan_secrets: count={secrets['count']}（{where}）",
-            suggestion="逐条人工复核；确认为真密钥的改为环境变量读取并立即轮换",
-        ))
+    if secrets:
+        if secrets.get("count"):
+            hits = secrets.get("hits") or []
+            where = "、".join(f"{h.get('file')}:{h.get('line')}" for h in hits[:3])
+            findings.append(Finding(
+                dimension="config", verdict=BLOCKER,
+                fact=f"疑似硬编码密钥 {secrets['count']} 处（命中 ≠ 泄密，示例值与占位符已剔除，仍需人工复核）",
+                evidence=f"scan_secrets: count={secrets['count']}（{where}）",
+                suggestion="逐条人工复核；确认为真密钥的改为环境变量读取并立即轮换",
+            ))
+        else:
+            findings.append(Finding(
+                dimension="config", verdict=GOOD,
+                fact="未发现疑似硬编码密钥（示例值与占位符已剔除，仍需人工复核）",
+                evidence=f"scan_secrets: count=0, local_defaults={secrets.get('local_defaults', 0)}",
+            ))
+
+    checklist = _data("project_checklist")
+    if checklist:
+        missing = set(checklist.get("missing") or [])
+        present = set(checklist.get("present") or [])
+        ci_key = ".github/workflows"
+        if ci_key in missing:
+            findings.append(Finding(
+                dimension="ci", verdict=BLOCKER,
+                fact="没有 CI 配置，改动没有自动验证",
+                evidence=f"project_checklist: missing 含 {ci_key}",
+                suggestion="先加一条 lint + test 的流水线，跑不起来就别谈质量",
+            ))
+        elif ci_key in present:
+            findings.append(Finding(
+                dimension="ci", verdict=GOOD,
+                fact="有 CI 配置（.github/workflows）",
+                evidence="project_checklist: .github/workflows 存在",
+            ))
+        others = sorted(missing - {ci_key, "LICENSE"})
+        if others:
+            findings.append(Finding(
+                dimension="docs", verdict=SUGGESTION,
+                fact=f"交付清单缺 {len(others)} 项：{'、'.join(others)}",
+                evidence=f"project_checklist: missing={sorted(missing)}",
+                suggestion="CHANGELOG 与 CONTRIBUTING 是别人愿意参与的前提，建议补齐",
+            ))
 
     return findings
+
+
+def _keep_owned_dimensions(
+    findings: list[Finding], owned: tuple[str, ...], expert: str
+) -> list[Finding]:
+    """只保留这个专家被分配到的维度，其余丢弃。
+
+    实测（deepseek，评 pallets/click）里模型会把结论挂到组内的别的维度上：
+    拿「注释率 5.3%」讲测试、拿「未发现硬编码密钥」讲统一错误处理。
+    dimension 字段没填错（是它组内的），但**内容与维度不相关**。
+    内容相关性没法用规则判，能做且该做的是先把越界的维度挡掉，
+    免得一个专家的臆测污染它根本没被分配去评审的维度。
+    """
+    kept: list[Finding] = []
+    for item in findings:
+        if _dimension_id(item.dimension) in owned:
+            kept.append(item)
+        else:
+            log.warning("专家 %s 给出了不属于它的维度（%s），丢弃", expert, item.dimension)
+    return kept
 
 
 def _normalize_verdict(value: str) -> str:
@@ -388,7 +461,8 @@ def run_review(
 
     两段式：先串行取证（进程级 set_root，不能并发），再并行判断。
     """
-    root_path = Path(root)
+    # 用规范化后的路径：Git Bash 传进来的 `/e/foo` 若原样显示，报告里会印成 `\e\foo`
+    root_path = _normalize_root(root).resolve()
     all_tools = tuple(dict.fromkeys(t for g in EXPERT_GROUPS for t in g["tools"]))
     evidence = collect_evidence(root_path, all_tools)
     overview = repo_digest(evidence)
@@ -402,7 +476,8 @@ def run_review(
         mine = {name: evidence[name] for name in group["tools"] if name in evidence}
         if judge is None:
             return []
-        return parse_findings(judge(_build_expert_prompt(group, mine, overview)))
+        findings = parse_findings(judge(_build_expert_prompt(group, mine, overview)))
+        return _keep_owned_dimensions(findings, group["dimensions"], group["name"])
 
     tasks = [TaskSpec(name=g["name"], goal=f"评审 {g['name']}", shared=overview) for g in EXPERT_GROUPS]
     results = run_fanout(tasks, _worker, max_workers=max_workers, timeout=timeout)

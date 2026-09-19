@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -89,6 +91,42 @@ def test_secrets_catches_underscored_password(tmp_path, monkeypatch):
     scan = quality.scan_secrets()
     assert scan["count"] >= 1
     assert any("password" in hit["kind"] or "口令" in hit["kind"] for hit in scan["hits"])
+
+
+def test_checklist_accepts_common_filename_aliases(tmp_path, monkeypatch):
+    """`LICENSE.txt` / `CHANGES.md` 是标准写法，不能判成缺失。
+
+    曾经误报：期望清单只写死 `LICENSE` 和 `CHANGELOG.md`，
+    pallets/click（用 LICENSE.txt + CHANGES.md）被评成「缺 LICENSE」。
+    """
+    from agent_kit.mcp_servers import _common
+
+    (tmp_path / "LICENSE.txt").write_text("MIT", encoding="utf-8")
+    (tmp_path / "CHANGES.md").write_text("# changes", encoding="utf-8")
+    monkeypatch.setattr(_common, "_ROOT_OVERRIDE", tmp_path)
+
+    checklist = doc_audit.project_checklist()
+    assert "LICENSE" in checklist["present"]
+    assert "CHANGELOG.md" in checklist["present"]
+    assert "LICENSE" not in checklist["missing"]
+
+
+def test_set_root_accepts_git_bash_paths(tmp_path, monkeypatch):
+    """`--path /e/WorkBuddy/foo`（Git Bash 写法）必须能落到 `E:\\WorkBuddy\\foo`。
+
+    否则 Windows Python 会解析成 `E:\\e\\WorkBuddy\\foo`，评审直接报目录不存在。
+    """
+    from agent_kit.mcp_servers import _common
+
+    try:
+        if os.name == "nt":
+            drive = Path(tmp_path).drive or "C:"
+            posix = "/" + drive[0].lower() + "/" + str(tmp_path).replace(drive, "").lstrip("\\/")
+            assert _common.set_root(posix) == tmp_path.resolve()
+        else:
+            assert _common.set_root(str(tmp_path)) == tmp_path.resolve()
+    finally:
+        _common.reset_root()
 
 
 def test_dependency_audit_understands_extras(tmp_path, monkeypatch):

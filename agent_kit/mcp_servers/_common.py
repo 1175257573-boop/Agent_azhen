@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # agent_kit/mcp_servers/xxx.py → 上两级是项目根
@@ -25,6 +26,23 @@ ROOT_ENV_VAR = "ATLAS_REVIEW_ROOT"
 _ROOT_OVERRIDE: Path | None = None
 
 
+def _normalize_root(path: str | Path) -> Path:
+    """把 `/e/WorkBuddy/...` 这类 POSIX 路径还原成 `E:\\WorkBuddy\\...`。
+
+    为什么需要：在 Git Bash 里调 `python main.py review --path /e/foo`，
+    Windows 上的 Python 会把 `/e/foo` 当成相对路径拼到当前盘符，
+    解析出 `E:\\e\\foo` —— 目录不存在，评审直接失败。
+    评审入口要接受各种 shell 传进来的路径，这一层转换必须在最前面做掉。
+    """
+    text = str(path)
+    # 两种形式都要认：`/e/foo`（shell 原样传入）和 `\e\foo`（已经被 Path() 转过一道）
+    match = re.match(r"^[/\\]([a-zA-Z])[/\\](.*)$", text) if os.name == "nt" else None
+    if match:
+        rest = match.group(2).replace("\\", "/")
+        return Path(f"{match.group(1).upper()}:/{rest}")
+    return Path(text)
+
+
 def set_root(path: str | Path) -> Path:
     """把取证根目录切到另一个仓库；返回实际生效的根。
 
@@ -32,7 +50,7 @@ def set_root(path: str | Path) -> Path:
     否则 14 个取证工具永远只能评本项目自己。
     """
     global _ROOT_OVERRIDE
-    target = Path(path).resolve()
+    target = _normalize_root(path).resolve()
     if not target.is_dir():
         raise ValueError(f"目录不存在：{target}")
     _ROOT_OVERRIDE = target
