@@ -37,6 +37,9 @@ log = get_logger("agent.memories")
 
 _TABLE = "memories"
 _LEASE_TABLE = "memory_lease"
+# 全局作业锁：Phase 2 的合并在改共享产物，同一时刻只能有一个在动
+_LOCK_TABLE = "memory_lock"
+PHASE2_LOCK = "phase2"
 
 # Phase 1 的状态机： pending → claimed → done / failed
 _STATE_PENDING = "pending"
@@ -78,6 +81,19 @@ DEFAULT_TOP_N = 20
 
 # 一次抽取默认给 2 分钟独占；超时后别的进程可以接手（防止进程被杀后 lease 永久悬挂）
 DEFAULT_LEASE_SECONDS = 120
+
+# Phase 2 的全局锁：同样是 DB 里的带过期 lease，只是没有 per-thread 粒度
+_LOCK_DDL = f"""
+CREATE TABLE IF NOT EXISTS {_LOCK_TABLE} (
+    name        TEXT PRIMARY KEY,
+    owner       TEXT,
+    lease_until REAL,
+    updated_at  TEXT NOT NULL
+);
+"""
+
+# 合并一次的默认独占时长；跑不完的话锁会过期给别人，但那之前谁也别碰产物
+DEFAULT_PHASE2_LOCK_SECONDS = 600
 DEFAULT_MAX_ATTEMPTS = 3
 # 失败退避：第 1 次失败等 10 秒、第 2 次 60 秒；第 3 次起不再自动重试，停在 failed 等人介入。
 # 长度必须正好是 DEFAULT_MAX_ATTEMPTS - 1（最后一次失败后面没有等待），有单测钉着这条不变量。
@@ -179,7 +195,7 @@ def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
-    conn.executescript(_DDL + _LEASE_DDL)
+    conn.executescript(_DDL + _LEASE_DDL + _LOCK_DDL)
     # WAL 让读不阻塞写；本机家目录适用（网络盘上不建议开，这里够用）
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
@@ -466,6 +482,87 @@ def _rollout_digest(records: list[dict[str, Any]]) -> str:
     for item in records:
         digest.update(f"{item['role']}|{item.get('tool_name') or ''}|{item['content']}\n".encode())
     return digest.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 全局作业锁（Phase 2 用）
+#
+# Phase 1 的 lease 是 per-thread 的，多个 worker 各干各的互不干扰；
+# Phase 2 反过来 —— 它在改 `raw_memories.md` / `MEMORY.md` 这些**共享产物**，
+# 两个进程同时合并会互相覆盖，还可能各写一版 MEMORY.md。
+# Codex 的做法是"改产物前先抢一把全局锁"，这里照做，机制与 Phase 1 同源（DB 里的带过期 lease）。
+# ---------------------------------------------------------------------------
+def claim_global_lock(
+    name: str = PHASE2_LOCK,
+    *,
+    owner: str | None = None,
+    lease_seconds: int = DEFAULT_PHASE2_LOCK_SECONDS,
+    db_path: str | Path | None = None,
+) -> bool:
+    """抢全局作业锁。抢到 True；已被别人占着（或拿不到写锁）返回 False。"""
+    who = owner or _default_owner()
+    now = _utc_epoch()
+    conn = _connect(db_path)
+    try:
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"INSERT OR IGNORE INTO {_LOCK_TABLE} (name, owner, lease_until, updated_at)"
+                " VALUES (?, NULL, NULL, ?)",
+                (name, _now_iso()),
+            )
+            cursor = conn.execute(
+                f"UPDATE {_LOCK_TABLE} SET owner=?, lease_until=?, updated_at=?"
+                " WHERE name=? AND (lease_until IS NULL OR lease_until < ?)",
+                (who, now + lease_seconds, _now_iso(), name, now),
+            )
+            won = cursor.rowcount == 1
+            conn.execute("COMMIT" if won else "ROLLBACK")
+            return won
+        except sqlite3.OperationalError as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            log.debug("抢不到全局锁 %s：%s", name, exc)
+            return False
+    finally:
+        conn.close()
+
+
+def release_global_lock(
+    name: str, owner: str, *, db_path: str | Path | None = None
+) -> bool:
+    """归还全局作业锁。只放自己持有的。"""
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute(
+            f"UPDATE {_LOCK_TABLE} SET owner=NULL, lease_until=NULL, updated_at=?"
+            " WHERE name=? AND owner=?",
+            (_now_iso(), name, owner),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def lock_owner(name: str = PHASE2_LOCK, *, db_path: str | Path | None = None) -> str | None:
+    """看锁现在归谁（锁空闲或已过期返回 None）。"""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            f"SELECT owner, lease_until FROM {_LOCK_TABLE} WHERE name=?", (name,)
+        ).fetchone()
+        if row is None:
+            return None
+        until = row["lease_until"]
+        if until is None or until < _utc_epoch():
+            return None
+        return row["owner"]
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -769,17 +866,54 @@ def run_phase2(
     db_path: str | Path | None = None,
     memories_dir: Path | str | None = None,
     use_git: bool = True,
+    use_lock: bool = True,
 ) -> Report:
     """合并选中的记忆，产出 MEMORY.md。
 
-    流程照 Codex 的 workspace diff：基线快照 → 同步产物 → diff → 有变更才调模型 → 再落一次快照。
-    `use_git=False` 时退回「每次全量重写」，行为与旧版一致。
+    流程照 Codex 的 workspace diff：抢全局锁 → 基线快照 → 同步产物 → diff →
+    有变更才调模型 → 落快照并 reset 基线 → 还锁。
+    `use_git=False` 退回「每次全量重写」，`use_lock=False` 关闭全局锁（单进程时可省这一步）。
     """
     from agent_kit import memory_git as git
 
     report = Report(phase="Phase 2 · 合并")
     root = Path(memories_dir) if memories_dir else layout().memories_dir
 
+    # ---- 全局锁：改的是共享产物，同一时刻只准一个进程在动
+    owner = _default_owner()
+    locked = claim_global_lock(PHASE2_LOCK, owner=owner, db_path=db_path) if use_lock else True
+    if not locked:
+        holder = lock_owner(PHASE2_LOCK, db_path=db_path)
+        report.skipped.append(("（合并）", f"另一个进程（{holder or '未知'}）正在合并，本次跳过"))
+        return report
+
+    try:
+        return _run_phase2_locked(
+            report,
+            root=root,
+            model=model,
+            make_model=make_model,
+            top_n=top_n,
+            db_path=db_path,
+            use_git=use_git,
+            git=git,
+        )
+    finally:
+        if use_lock:
+            release_global_lock(PHASE2_LOCK, owner, db_path=db_path)
+
+
+def _run_phase2_locked(
+    report: Report,
+    *,
+    root: Path,
+    model: Any,
+    make_model: Callable[[], Any] | None,
+    top_n: int,
+    db_path: str | Path | None,
+    use_git: bool,
+    git: Any,
+) -> Report:
     git_ready = False
     if use_git:
         git_ready, reason = git.ensure_repo(root)
@@ -813,8 +947,17 @@ def run_phase2(
 
     raw = (root / "raw_memories.md").read_text(encoding="utf-8")
     change_list = git.changes(root) if git_ready else []
+    # Codex 把 diff 落成文件交给 consolidation agent，而不是只在 prompt 里提一句文件名；
+    # 这样模型能看到**新增/删除的具体内容**，而不只是「哪些文件动了」
+    diff_path = git.write_diff_artifact(root) if git_ready else None
     diff_hint = ""
-    if git_ready:
+    if diff_path:
+        diff_hint = (
+            "\n\n本次相对上次合并的产物变更见 "
+            f"{Path(diff_path).name}（重点处理这些变化，其余保持一致）：\n"
+            f"{git.describe(change_list)}"
+        )
+    elif git_ready:
         diff_hint = (
             "\n\n本次相对上次合并，产物变动如下（重点处理这些变化，其余保持一致）：\n"
             f"{git.describe(change_list)}"
@@ -841,6 +984,11 @@ def run_phase2(
     target.write_text(content, encoding="utf-8")
     report.artifacts.append(str(target))
     report.succeeded.append("MEMORY.md")
+
     if git_ready:
+        # diff 是给模型看的临时产物，落基线前必须删掉：
+        # 否则这次删除掉的内容会被留在产物文件里、也留在 git 对象里（Codex 明确这么做）
+        if diff_path:
+            Path(diff_path).unlink(missing_ok=True)
         git.snapshot(root, f"consolidate: 本次 {len(change_list)} 个文件变更")
     return report

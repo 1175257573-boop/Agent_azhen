@@ -139,6 +139,42 @@ def describe(items: list[tuple[str, str]]) -> str:
     return "\n".join(f"  - {labels.get(kind, kind)} {path}" for kind, path in items)
 
 
+def diff_text(root: Path | str) -> str:
+    """产出相对 HEAD 的完整 git diff 文本。
+
+    先 `add -N` 把新文件登记为「意图添加」，否则未跟踪的新记忆不会出现在 diff 里，
+    agent 就看不到这次新抽出了什么。
+    """
+    directory = Path(root)
+    if not git_available() or not is_repo(directory):
+        return ""
+    try:
+        _run(directory, "add", "-N", ".")
+        result = _run(directory, "diff", "--no-color")
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return ""
+    return result.stdout
+
+
+# Codex 在 memories root 落的就是这个文件， consolidation agent 拿它当增量上下文
+DIFF_ARTIFACT = "phase2_workspace_diff.md"
+
+
+def write_diff_artifact(root: Path | str, filename: str = DIFF_ARTIFACT) -> str | None:
+    """把 diff 落成产物文件，返回绝对路径；没有差异内容时返回 None。
+
+    注意这个文件是**临时的**：Codex 要在 reset 基线前把它删掉，
+    否则删掉的内容会留在 prompt 产物和够不到的 git 对象里。
+    """
+    directory = Path(root)
+    content = diff_text(directory)
+    if not content.strip():
+        return None
+    target = directory / filename
+    target.write_text(f"# 记忆产物变更（相对上次合并基线）\n\n{content}", encoding="utf-8")
+    return str(target)
+
+
 def history(root: Path | str, *, limit: int = 5) -> list[str]:
     """看最近几次快照的提交说明（排查用）。"""
     directory = Path(root)
