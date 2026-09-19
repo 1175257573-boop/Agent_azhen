@@ -24,6 +24,8 @@ from __future__ import annotations
 import time
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
 from langchain.agents import AgentState
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
@@ -38,6 +40,11 @@ log = get_logger("agent.guards")
 DEFAULT_MAX_HOPS = 4          # 最多交接几次
 DEFAULT_MAX_MODEL_CALLS = 20  # 单轮最多调用几次模型
 DEFAULT_MAX_SECONDS = 180.0   # 单轮最长跑多久
+# token 维度：多智能体 fan-out 下「调用次数」衡量不了成本 ——
+# 四个专家各调 3 次（看似很省）可能比一个专家调 10 次贵得多，
+# 因为每次调用的上下文长度差了一个量级。
+DEFAULT_MAX_PROMPT_TOKENS = 200_000
+DEFAULT_MAX_COMPLETION_TOKENS = 20_000
 
 # 统一收敛出口的节点名：所有防线的终点都是它
 ESCALATE = "escalate"
@@ -158,6 +165,130 @@ def make_budget_guard(
         return _stop(reason) if reason else await handler(request)
 
     return dual_model(sync_fn, async_fn, name=name)
+
+
+# ---------------------------------------------------------------------------
+# 二之二、成本闸门（token 维度）
+#
+# 为什么不能只看调用次数：fan-out 拓扑下一次「调用」的成本差距能有一个量级——
+# 专家 A 带 200 token 的摘要，专家 B 带 20k token 的代码库，都算「一次」。
+# 成本控制必须落到 token。
+#
+# 计数器放在闭包而不是 state 里：middleware 拿到的 state 是只读快照，
+# 写回去并不生效（原实现里 `model_calls` 全程为 0，步数维度**从来没触发过**，
+# 就是这个原因）。闭包自己记，并且暴露 reset() 供按轮重挂。
+# ---------------------------------------------------------------------------
+@dataclass
+class CostMeter:
+    """一次任务（或一轮）的模型调用账本。"""
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def add(self, response: Any) -> None:
+        """从模型响应里把用量加到账本上；拿不到 usage 就只记次数。"""
+        self.calls += 1
+        usage = _extract_usage(response)
+        if usage is None:
+            return
+        self.prompt_tokens += usage[0]
+        self.completion_tokens += usage[1]
+
+    def reset(self) -> None:
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "calls": self.calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+def _extract_usage(response: Any) -> tuple[int, int] | None:
+    """从模型响应里拿 (prompt, completion) token 数。
+
+   各家字段名不统一：langchain 通用是 `usage_metadata`，OpenAI 兼容端点也常给
+   `response_metadata.token_usage`。两个都试，都拿不到就返回 None（按「只记次数」处理）。
+    """
+    meta = getattr(response, "usage_metadata", None)
+    if isinstance(meta, dict):
+        return int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0)
+
+    reply = getattr(response, "response_metadata", None)
+    if isinstance(reply, dict):
+        usage = reply.get("token_usage") or reply.get("usage") or {}
+        if isinstance(usage, dict):
+            return int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+    return None
+
+
+def make_cost_guard(
+    *,
+    max_model_calls: int | None = DEFAULT_MAX_MODEL_CALLS,
+    max_prompt_tokens: int | None = DEFAULT_MAX_PROMPT_TOKENS,
+    max_completion_tokens: int | None = DEFAULT_MAX_COMPLETION_TOKENS,
+    max_seconds: float | None = DEFAULT_MAX_SECONDS,
+    meter: CostMeter | None = None,
+    name: str = "cost_guard",
+) -> tuple[Any, CostMeter]:
+    """成本闸门：调用次数 + 输入/输出 token + 墙钟，四个维度谁先超都短路。
+
+    Returns:
+        (中间件, 账本)。账本要留着——超限后要能读到「到底烧了多少」，
+        否则日志里只有一句「超预算了」，排查不了是哪个专家烧的。
+
+    用法（多智能体按轮重挂，避免上一轮的计数带进来）：
+        middleware, meter = make_cost_guard(max_prompt_tokens=50_000)
+        ...
+        meter.reset()   # 新一轮开始
+    """
+    ledger = meter or CostMeter()
+    started = time.monotonic()
+
+    def _reached() -> str | None:
+        if max_model_calls is not None and ledger.calls >= max_model_calls:
+            return f"模型调用次数已达上限（{ledger.calls}/{max_model_calls}）"
+        if max_prompt_tokens is not None and ledger.prompt_tokens >= max_prompt_tokens:
+            return f"输入 token 已达上限（{ledger.prompt_tokens}/{max_prompt_tokens}）"
+        if max_completion_tokens is not None and ledger.completion_tokens >= max_completion_tokens:
+            return f"输出 token 已达上限（{ledger.completion_tokens}/{max_completion_tokens}）"
+        if max_seconds is not None and (time.monotonic() - started) > max_seconds:
+            return f"耗时已达上限（{max_seconds:.0f} 秒）"
+        return None
+
+    def _stop(reason: str) -> ModelResponse:
+        log.warning("成本闸门触发：%s；当前用量 %s", reason, ledger.as_dict())
+        return ModelResponse(
+            result=[AIMessage(content=f"[已停止] {reason}。已用 {ledger.as_dict()}，"
+                                      "请根据已有进展继续，或缩小范围后重试。")]
+        )
+
+    def sync_fn(request: ModelRequest, handler) -> ModelResponse:
+        reason = _reached()
+        if reason:
+            return _stop(reason)
+        response = handler(request)
+        ledger.add(response)
+        return response
+
+    async def async_fn(request: ModelRequest, handler) -> ModelResponse:
+        reason = _reached()
+        if reason:
+            return _stop(reason)
+        response = await handler(request)
+        ledger.add(response)
+        return response
+
+    return dual_model(sync_fn, async_fn, name=name), ledger
 
 
 # ---------------------------------------------------------------------------

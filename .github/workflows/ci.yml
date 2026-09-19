@@ -86,6 +86,10 @@ jobs:
           ATLAS_HOME: ${{ runner.temp }}/atlas-ci
         run: python main.py memories --background --wait 20
 
+      # Fan-out 编排：并发 / 超时 / 冲突消解都是时序相关，CI 上跑一遍防回归
+      - name: Fan-out 编排演示（去重 / 并行限时 / 冲突消解 / token 预算）
+        run: python main.py fanout
+
       - name: MCP Server 协议连通（4 个 server / 21 个工具）
         run: python examples/mcp_servers_demo.py
 

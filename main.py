@@ -11,6 +11,7 @@ Python 没有启动注解，约定俗成的等价物是「入口文件 + if __na
     python main.py check [--ping]            # 环境变量自查 / 连通性探测
     python main.py mcp                       # MCP 工具演示
     python main.py guards                    # Multi-Agent 防护演示（跑偏 / 循环拦截）
+    python main.py fanout                    # Fan-out 编排演示（多专家去重 / 限时 / 消解 / 预算）
     python main.py info                      # 打印运行环境概况
 
 等价写法：
@@ -134,6 +135,14 @@ def cmd_guards(_: argparse.Namespace) -> int:
     from examples.guards_demo import main as guards_main
 
     guards_main()
+    return 0
+
+
+def cmd_fanout(_: argparse.Namespace) -> int:
+    """Fan-out 编排演示：拆解去重 + 并行限时 + 汇总消解 + token 预算（离线，零 API Key）。"""
+    from examples.fanout_demo import main as fanout_main
+
+    fanout_main()
     return 0
 
 
@@ -392,6 +401,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_guards = sub.add_parser("guards", parents=[common], help="Multi-Agent 防护演示（跑偏 / 循环拦截，离线）")
     p_guards.set_defaults(func=cmd_guards)
+
+    p_fanout = sub.add_parser(
+        "fanout", parents=[common],
+        help="Fan-out 编排演示（多专家去重 / 并行限时 / 冲突消解 / token 预算，离线）",
+    )
+    p_fanout.set_defaults(func=cmd_fanout)
 
     p_ret = sub.add_parser("retrievers", parents=[common], help="检索扩展点自检（列出已注册检索器）")
     p_ret.add_argument("--q", default="遗忘曲线", help="用默认检索器试查一句话")

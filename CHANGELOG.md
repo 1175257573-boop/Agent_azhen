@@ -206,8 +206,48 @@ sub-agent 会话被正确排除；重复运行时 Phase 1 按内容指纹跳过�
 - 拦截器对照表的来源改为 `langchain-mcp-adapters` 的官方 `ToolCallInterceptor` 协议。
 - README 新增第 11 节「参考资料」：官方文档清单 + 本项目与官方做法不同的三处取舍。
 
+### 新增（Fan-out 拓扑：多专家的成本与效率控制）
+
+- **`agent_kit/multi_agent/fanout.py`**（新文件）：主 agent 拆解 → N 个专家并行 →
+  汇总消解这一拓扑特有的四件事。
+  · `dedupe_tasks()`：拆完先去重，用 Jaccard 相似度（**不再为此调模型**）；
+    并加 `MIN_EVIDENCE` 保护——特征并集不足 4 个词就不下合并判断，
+    否则「任务0」「任务1」这类极短 goal 会因只抽得出 1 个共同词而被误判成同一件事。
+  · `run_fanout()`：并发上限（`BoundedSemaphore`）+ **整轮墙钟上限**；
+    到点未交回执的专家标记 `timed_out=True`（不算失败、不重试），由主 agent 决定降级/重派/跳过。
+  · `detect_conflicts()`：汇总阶段找出互相打架的结论，覆盖 `resource`（A 说改 X、B 说删 X）
+    与 `verdict`（对同一判断给出相反结论）两类，规则识别不调模型；失败与超时的回执不参与比对。
+  · `plan_fanout()`：先去重再按人头分预算——每个专家上限独立，
+    共用一个池子会出现「专家 1 烧光、专家 4 还没开始」。
+- **`guards.py` 新增 token 维度成本闸门 `make_cost_guard()` + 账本 `CostMeter`**：
+  同时看调用次数 / 输入 token / 输出 token / 墙钟四个维度，谁先超都短路。
+  计数器放在**闭包**里而不是 state —— middleware 拿到的 state 是只读快照，
+  写回去不生效（原 `make_budget_guard` 的步数维度**从来没触发过**，就是这个原因）。
+  账本随中间件一起返回，超限后能读到「到底烧了多少」。
+- **新增离线演示 `examples/fanout_demo.py` + `python main.py fanout` 子命令**：
+  零 API Key 跑完「拆解去重 → 并行限时 → 汇总消解 → token 预算」四段，
+  每段都把「浪费了多少 / 省下了多少」量出来，而不只是证明跑通。
+- 测试 204 → **223**（新增 `tests/test_fanout.py` 19 个用例）。
+
+### 修复（本批实测发现）
+
+- **`with ThreadPoolExecutor(...)` 会让超时保护失效**：上下文管理器退出时
+  `shutdown(wait=True)` 会一直等到所有任务跑完，即便已对 future 设了超时、
+  主流程不再等待，省下的时间也会在这里原封不动等回去。
+  改为自己起守护线程并按全局 deadline `join`，到点就走，不等掉队的
+  （`test_fanout_round_budget_holds_when_serialized` 钉住该行为）。
+- **冲突检测正则匹配不到中文表述**：原 pattern 动词与文件名之间只留了 `\s*`，
+  而中文里几乎必然夹着东西（「修改了 `service.py`」的「了」），实际一个都匹配不上。
+  改为动词后允许最多 8 个非换行字符的缓冲。
+- `dedupe_tasks` 原来用 `tasks.index(other)` 反查下标，遇重复对象会取错行；改为随 `kept` 一起存下标。
+
 ### 文档
 
+- README 新增 5.2.1 节「Fan-out 拓扑：一群专家怎么不浪费、不打架」：
+  四张表说清「拆解去重 / 派发限时 / 汇总消解 / token 预算」分别解决什么，
+  并记录上面两个「跑得通但保护没生效」的坑；
+  同时给出**什么业务场景真该用这么复杂的多 Agent**（代码库审计、多方向调研、
+  长文档分块、多方案并行设计）与三个反例（写作改写、串行调试、需全局一致风格的任务）。
 - 清理代码 docstring 中 9 处对外部资料的引用，改为中性的技术表述。
 - 移除 README 第 5.1 节的本机环境细节（Windows 安装路径、服务启停脚本、组件版本号），
   统一改为跨平台的 `docker compose` 说明；`docker-compose.yml` 与 `.gitignore`
