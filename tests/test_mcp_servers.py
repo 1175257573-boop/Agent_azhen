@@ -74,6 +74,41 @@ def test_secrets_downgrades_localhost_defaults():
         assert "file" in item and "line" in item
 
 
+def test_secrets_catches_underscored_password(tmp_path, monkeypatch):
+    """`DB_PASSWORD = "..."` 这种最常见写法必须命中。
+
+    曾经漏报：正则给 password 加了 `\b` 前缀，而 `DB_PASSWORD` 里
+    `PASSWORD` 前是下划线 —— 下划线属于单词字符，`\b` 在此不成立。
+    是评审真实仓库时实测发现的，这条用例就是那个坑的钉子。
+    """
+    from agent_kit.mcp_servers import _common
+
+    (tmp_path / "app.py").write_text('DB_PASSWORD = "Tr0ub4dor&3xK"\n', encoding="utf-8")
+    monkeypatch.setattr(_common, "_ROOT_OVERRIDE", tmp_path)
+
+    scan = quality.scan_secrets()
+    assert scan["count"] >= 1
+    assert any("password" in hit["kind"] or "口令" in hit["kind"] for hit in scan["hits"])
+
+
+def test_dependency_audit_understands_extras(tmp_path, monkeypatch):
+    """`psycopg[binary]==3.3.5` 是钉了版本的，不能算未钉。
+
+    曾经误报：判定时用 `line.split("[")[0]` 去 extras，把 `==3.3.5` 一起砍没了。
+    是评审本项目自己时实测发现的，这条用例就是那个坑的钉子。
+    """
+    from agent_kit.mcp_servers import _common
+
+    (tmp_path / "requirements.txt").write_text(
+        "psycopg[binary]==3.3.5\nuvicorn[standard]==0.53.0\nflask\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(_common, "_ROOT_OVERRIDE", tmp_path)
+
+    audit = quality.dependency_audit()
+    assert audit["pinned"] == 2
+    assert audit["unpinned"] == ["flask"]
+
+
 def test_check_tests_finds_suite():
     tests = quality.check_tests()
     assert tests["has_tests_dir"] is True

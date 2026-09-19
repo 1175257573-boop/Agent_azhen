@@ -27,7 +27,7 @@ if __package__ in (None, ""):
 
 from fastmcp import FastMCP
 
-from agent_kit.mcp_servers._common import PROJECT_ROOT, SKIP_DIRS, resolve_dir
+from agent_kit.mcp_servers._common import SKIP_DIRS, project_root, resolve_dir
 
 mcp = FastMCP("atlas-docs-mcp")
 
@@ -192,7 +192,7 @@ def docs_policy() -> str:
             "2. 所有 `#锚点` 必须有对应 `<a id>`，中文标题不依赖 GitHub 自动 slug。",
             "3. 任何用户可见改动都要进 CHANGELOG 的 Unreleased。",
             "4. 必备文件缺失即为不合格，尤其 LICENSE。",
-            f"项目根：{PROJECT_ROOT.name}",
+            f"项目根：{project_root().name}",
         ]
     )
 

@@ -90,6 +90,13 @@ jobs:
       - name: Fan-out 编排演示（去重 / 并行限时 / 冲突消解 / token 预算）
         run: python main.py fanout
 
+      # 评审链路：取证规则与降级行为都是确定性的，CI 上跑一遍防回归
+      - name: 工程健康度评审（取证 / 并行判断 / 防幻觉 / 降级）
+        run: python examples/review_demo.py
+
+      - name: 评审命令冒烟（离线降级路径）
+        run: python main.py review --path . --no-judge
+
       - name: MCP Server 协议连通（4 个 server / 21 个工具）
         run: python examples/mcp_servers_demo.py
 

@@ -26,7 +26,7 @@ if __package__ in (None, ""):
 
 from fastmcp import FastMCP
 
-from agent_kit.mcp_servers._common import PROJECT_ROOT, resolve_dir
+from agent_kit.mcp_servers._common import project_root, resolve_dir
 
 mcp = FastMCP("atlas-git-mcp")
 
@@ -209,7 +209,7 @@ def git_policy() -> str:
             "",
             "只提供只读查询：状态 / 日志 / 变更统计 / 贡献者 / 提交搜索。",
             "不提供 commit、push、reset、checkout 等任何写操作——版本历史由人类决定。",
-            f"仓库根目录：{PROJECT_ROOT.name}",
+            f"仓库根目录：{project_root().name}",
         ]
     )
 

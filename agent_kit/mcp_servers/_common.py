@@ -11,10 +11,50 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # agent_kit/mcp_servers/xxx.py → 上两级是项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# 评审「别的仓库」时要能换根。为什么用环境变量而不是函数参数：
+#   MCP Server 是独立进程，工具签名由模型调用、不便临时加参；
+#   而 `subdir` 参数受越界校验保护，不能用来指向项目外的目录。
+#   环境变量是进程级、一次性、可审计的换根方式。
+ROOT_ENV_VAR = "ATLAS_REVIEW_ROOT"
+_ROOT_OVERRIDE: Path | None = None
+
+
+def set_root(path: str | Path) -> Path:
+    """把取证根目录切到另一个仓库；返回实际生效的根。
+
+    只有先换根，「评审任意仓库」这个业务才成立 ——
+    否则 14 个取证工具永远只能评本项目自己。
+    """
+    global _ROOT_OVERRIDE
+    target = Path(path).resolve()
+    if not target.is_dir():
+        raise ValueError(f"目录不存在：{target}")
+    _ROOT_OVERRIDE = target
+    return target
+
+
+def reset_root() -> None:
+    """切回默认根（项目自身）。"""
+    global _ROOT_OVERRIDE
+    _ROOT_OVERRIDE = None
+
+
+def project_root() -> Path:
+    """当前生效的取证根目录：显式 set_root > 环境变量 > 项目自身。"""
+    if _ROOT_OVERRIDE is not None:
+        return _ROOT_OVERRIDE
+    env = os.environ.get(ROOT_ENV_VAR)
+    if env:
+        target = Path(env).resolve()
+        if target.is_dir():
+            return target
+    return PROJECT_ROOT
 
 # 扫目录时必须跳过的：体量大且与工程质量无关
 SKIP_DIRS = {
@@ -37,7 +77,7 @@ CODE_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".vue", ".java", ".go", ".rs", ".s
 
 def resolve_dir(subdir: str = ".") -> Path:
     """把相对路径解析成项目内的绝对目录，越界则报错。"""
-    root = PROJECT_ROOT.resolve()
+    root = project_root().resolve()
     target = (root / subdir).resolve() if subdir and subdir != "." else root
     if target == root or root in target.parents:
         if target.is_dir():

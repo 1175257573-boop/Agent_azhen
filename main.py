@@ -12,6 +12,7 @@ Python 没有启动注解，约定俗成的等价物是「入口文件 + if __na
     python main.py mcp                       # MCP 工具演示
     python main.py guards                    # Multi-Agent 防护演示（跑偏 / 循环拦截）
     python main.py fanout                    # Fan-out 编排演示（多专家去重 / 限时 / 消解 / 预算）
+    python main.py review --path .           # 工程健康度评审（八项取证 + 四专家并行判断）
     python main.py info                      # 打印运行环境概况
 
 等价写法：
@@ -143,6 +144,45 @@ def cmd_fanout(_: argparse.Namespace) -> int:
     from examples.fanout_demo import main as fanout_main
 
     fanout_main()
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """工程健康度评审：八项取证 + 四个专家并行判断。
+
+    没有可用模型时**降级为证据清单**，一句结论都不下——
+    评审报告里最危险的一行是「未发现问题」，没取到证就必须说没查。
+    """
+    from collections.abc import Callable
+
+    from agent_kit.config import AgentSettings, build_chat_model, detect_provider
+    from agent_kit.multi_agent import review as review_mod
+
+    judge: Callable[[str], str] | None = None
+    provider = "fake"
+    if not args.no_judge:
+        try:
+            provider = detect_provider()
+            if provider == "fake":
+                print("[info] 未检测到任何模型 Key，本次为降级报告：只出证据清单，不下结论。")
+            else:
+                model = build_chat_model(AgentSettings(provider=provider))
+
+                def judge(prompt: str) -> str:  # type: ignore[misc]
+                    return str(model.invoke(prompt).content)
+        except Exception as exc:  # noqa: BLE001 - 模型不可用时降级，不该让评审整个失败
+            print(f"[warn] 模型不可用，转为降级报告：{exc}")
+            judge = None
+
+    report = review_mod.run_review(args.path, judge=judge)
+    text = review_mod.render_markdown(report)
+    print(text)
+
+    if args.out:
+        settings = AgentSettings(provider=provider)
+        dest = settings.sandbox_dir / args.out
+        dest.write_text(text, encoding="utf-8")
+        print(f"\n报告已写入：{dest}")
     return 0
 
 
@@ -407,6 +447,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fan-out 编排演示（多专家去重 / 并行限时 / 冲突消解 / token 预算，离线）",
     )
     p_fanout.set_defaults(func=cmd_fanout)
+
+    p_review = sub.add_parser(
+        "review", parents=[common],
+        help="工程健康度评审（八项取证 + 四专家并行判断，无 Key 时降级为证据清单）",
+    )
+    p_review.add_argument("--path", default=".", help="被评仓库路径，默认当前目录")
+    p_review.add_argument("--out", default="", help="把报告写到 runs/ 下，如 --out review.md")
+    p_review.add_argument("--no-judge", action="store_true", help="强制降级：只出证据清单，不调模型")
+    p_review.set_defaults(func=cmd_review)
 
     p_ret = sub.add_parser("retrievers", parents=[common], help="检索扩展点自检（列出已注册检索器）")
     p_ret.add_argument("--q", default="遗忘曲线", help="用默认检索器试查一句话")

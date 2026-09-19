@@ -26,7 +26,7 @@ if __package__ in (None, ""):
 
 from fastmcp import FastMCP
 
-from agent_kit.mcp_servers._common import PROJECT_ROOT, iter_code_files, rel, resolve_dir
+from agent_kit.mcp_servers._common import iter_code_files, project_root, rel, resolve_dir
 
 mcp = FastMCP("atlas-quality-mcp")
 
@@ -39,7 +39,10 @@ SECRET_PATTERNS = [
     ("私钥文件", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("云厂商 AK", re.compile(r"\b(?:AKIA|LTAI|ASIA)[0-9A-Z]{12,}\b")),
     ("通用 sk- 令牌", re.compile(r"\bsk-[A-Za-z0-9._\-]{16,}\b")),
-    ("硬编码口令", re.compile(r"(?i)\b(?:password|passwd|pwd)\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']")),
+    # 注意不能再给 password 加 `\b` 前缀：`DB_PASSWORD = "..."` 里 `PASSWORD` 前是下划线，
+    # 而 `_` 属于单词字符，`\b` 在此不成立 —— 最常见的一种硬编码写法会被整条漏掉
+    # （评审真实仓库时实测发现的漏报）。改为允许变量名前后带单词字符。
+    ("硬编码口令", re.compile(r"(?i)(?:password|passwd|pwd)\w*\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']")),
     # 主机名也要捕获进来：只匹配到 @ 就结束的话，后面无法判断是不是 localhost 默认凭据
     ("数据库连接串", re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis)://[^\s\"']+:[^\s\"'@]+@[^\s\"'/]+")),
 ]
@@ -89,7 +92,7 @@ def project_code_stats(subdir: str = ".") -> dict:
                 comment += 1
 
     return {
-        "root": rel(root, PROJECT_ROOT),
+        "root": rel(root, project_root()),
         "files": files,
         "total_lines": total,
         "code_lines": total - blank - comment,
@@ -203,7 +206,7 @@ def check_tests(subdir: str = ".") -> dict:
             continue
 
     return {
-        "root": rel(root, PROJECT_ROOT),
+        "root": rel(root, project_root()),
         "has_tests_dir": (root / "tests").is_dir(),
         "test_files": len(test_files),
         "test_cases": cases,
@@ -233,7 +236,10 @@ def dependency_audit(subdir: str = ".") -> dict:
         line = raw.strip()
         if not line or line.startswith(("#", "-")):
             continue
-        (pinned if re.search(r"[=><~]=?", line.split("[")[0]) else unpinned).append(line)
+        # 先摘掉 extras 再判版本：`psycopg[binary]==3.3.5` 是钉了版本的，
+        # 但直接 `split("[")[0]` 会把 `==3.3.5` 一起砍掉，误判成未钉（实测发现的误报）。
+        spec = re.sub(r"\[[^\]]*\]", "", line)
+        (pinned if re.search(r"[=><~]=?", spec) else unpinned).append(line)
 
     return {
         "found": True,
