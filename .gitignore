@@ -45,6 +45,16 @@ checkpoints.sqlite
 secrets/
 credentials.json
 
+# ---------- 凭据兜底（纵深防御）----------
+# 对应 agent_kit/credentials.py 的落盘位置 ATLAS_HOME/credentials.json
+# 以及「记住到本机」开关产生的文件。上面已有 credentials.json，
+# 这里再覆盖「子目录 / 变体命名」两种情况，防止 .gitignore 规则被误改后裸奔。
+.atlas/
+**/credentials.json
+*.credentials.json
+*.local.env
+*.secret
+
 # ---------- 操作系统 ----------
 .DS_Store
 Thumbs.db

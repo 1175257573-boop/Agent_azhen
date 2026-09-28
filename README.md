@@ -1068,6 +1068,46 @@ python main.py eval --real    # 效果评估：真机调用，产出真实指标
 发现安全漏洞请走 [Private vulnerability reporting](../../security/advisories/new)，
 不要开公开 Issue。
 
+### 密钥留在本机：三道闸
+
+密钥泄露只有两条路——**进了 git 历史**（一旦推送即永久公开），或**发给了第三方**。
+本项目把这两条路都堵上：
+
+| # | 闸 | 机制 |
+|---|---|---|
+| 1 | **落盘闸** | 密钥默认只活在服务进程内存里，不落盘；只有显式勾选「记住到本机」才写 `~/.atlas/credentials.json`（仓库之外，POSIX 下 0600） |
+| 2 | **入库闸** | `.gitignore` 忽略 + `.githooks/pre-commit` 提交前扫描，命中疑似密钥或敏感文件即拒绝提交 |
+| 3 | **出网闸** | Web 服务默认只监听 `127.0.0.1`；密钥接口按来源地址校验，非本机一律 403。Key 只被直接送给你选定的模型服务商，**不经任何中转** |
+
+启用第 2 道闸（钩子路径不随 clone 分发，克隆后需手动指一次）：
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit      # Linux / macOS；Windows 可跳过
+```
+
+验证它确实在工作：
+
+```bash
+echo "K = \"sk-$(printf 'a%.0s' $(seq 1 30))\"" > leak-probe.txt
+git add leak-probe.txt
+git commit -m "should be blocked"        # 预期被拦下
+git restore --staged leak-probe.txt && rm leak-probe.txt
+```
+
+钩子扫描 `sk-` / `AKIA` / `ghp_` / `xox?` / `AIza` / PEM 私钥块等明确形态，
+以及 `.env`、`credentials.json`、`*.pem` 这类文件。测试里的假密钥若被误判，
+两种放行方式：登记完整串到 `.githooks/pre-commit` 的 `ALLOW_SAMPLES`，
+或给那一行加 `# secret-scan: allow`（只豁免该行）。
+
+密钥的三种落地方式，按暴露面从小到大：
+
+| 方式 | 是否落盘 | 是否进仓库 | 适用 |
+|---|---|---|---|
+| 环境变量（`setx DASHSCOPE_API_KEY "..."`） | 否（进程内存） | 否 | **推荐**，日常首选 |
+| `/client` 界面「密钥管理」面板 | 默认否；勾「记住到本机」才写 `~/.atlas/credentials.json` | 否（仓库外） | 临时机器 / 多把钥切换 |
+| 项目根 `.env` | 是（明文） | 否（`.gitignore` 拦住） | 本地调试 |
+
 <a id="sec9"></a>
 ## 9. 参与贡献
 

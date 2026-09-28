@@ -1,0 +1,163 @@
+#!/bin/sh
+# =============================================================================
+# Atlas · 提交前密钥扫描（pre-commit 钩子）
+#
+# 这道闸只干一件事：让疑似真实密钥在 **被 commit 之前** 就被拦下。
+#
+# 为什么必须拦在这一步 —— commit 一旦生成，即使随后把密钥从文件里删掉，
+# 它仍然留在 git 对象与 reflog 里；只要推到远程，就等于永久公开，届时能
+# 做的只剩「去控制台轮换密钥」。所以唯一的低成本时机就是现在。
+#
+# 启用（克隆后在本仓库根目录执行一次，钩子路径不随 clone 分发）：
+#     git config core.hooksPath .githooks
+#     chmod +x .githooks/pre-commit      # Linux / macOS；Windows 可跳过
+#
+# 跳过（不推荐，且请先确认命中的确实是假数据）：
+#     git commit --no-verify
+#
+# 说明：本脚本假定仓库内路径不含空格（符合本仓库现状）。
+# =============================================================================
+set -u
+
+# ---------- 1. 明确形态的密钥：命中即阻断 ------------------------------------
+# 覆盖 DashScope / OpenAI / DeepSeek(sk-)、AWS(AKIA)、GitHub(ghp_ 等)、
+# Slack(xox?)、Google(AIza)，以及 PEM 私钥块。
+HARD='sk-[A-Za-z0-9_-]{16,}'
+HARD="$HARD"'|AKIA[0-9A-Z]{16}'
+HARD="$HARD"'|gh[pousr]_[A-Za-z0-9]{20,}'
+HARD="$HARD"'|xox[baprs]-[A-Za-z0-9-]{10,}'
+HARD="$HARD"'|AIza[0-9A-Za-z_-]{35}'
+HARD="$HARD"'|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+# ---------- 2. 测试夹具白名单（完整串精确匹配）-------------------------------
+# 下列是 tests/ 里长期存在的**假**密钥样例，专用于验证打码与脱敏逻辑。
+# 采用「整串相等」而非「片段包含」，避免真实密钥碰巧含有某片段而被放过。
+#
+# 以后在测试里新写假密钥，有两种做法（不会误伤真实密钥）：
+#   a) 把完整串登记到这里；
+#   b) 或在那一行加行级豁免注释：  # secret-scan: allow
+#      （豁免只作用于所在行，且会写进代码——便于评审时一眼看到谁被放行了）
+ALLOW_SAMPLES='ghp_abcdefghijklmnopqrstuv
+sk-Qw9xT2mN5pRk7vLb3Zc
+sk-ZZZZZZZZZZZZZZZZZZZZ
+sk-abcdef0123456789abcdef0123456789
+sk-abcdefghijklmnopqrstuvwxyz123456
+sk-original-from-system-env
+sk-unregistered-key-123456'
+
+# 行级豁免标记：该行不参与扫描
+EXEMPT_RE='secret-scan:[[:space:]]*allow'
+
+# ---------- 3. 可疑的硬编码赋值：只提醒，不阻断 ------------------------------
+SQ="'"
+SOFT="(api[_-]?key|apikey|secret|password|passwd|access[_-]?token|auth[_-]?token)[[:space:]]*[:=][[:space:]]*[\"${SQ}][A-Za-z0-9_./+=-]{24,}[\"${SQ}]"
+
+# ---------- 判定函数 ---------------------------------------------------------
+is_sensitive_path() {
+    case "$1" in
+        .env.example|*/.env.example) return 1 ;;
+        .env|.env.*|*/.env|*/.env.*) return 0 ;;
+        credentials.json|*/credentials.json) return 0 ;;
+        *.pem|*.key|*.p12|*.pfx|*.secret) return 0 ;;
+    esac
+    return 1
+}
+
+is_binary_path() {
+    case "$1" in
+        *.png|*.jpg|*.jpeg|*.gif|*.ico|*.svg|*.webp|*.woff|*.woff2|*.ttf) return 0 ;;
+        *.pdf|*.zip|*.gz|*.tar|*.whl|*.so|*.dylib|*.dll|*.exe|*.db|*.sqlite) return 0 ;;
+    esac
+    return 1
+}
+
+is_allowed_sample() {
+    while IFS= read -r _s; do
+        [ -z "$_s" ] && continue
+        [ "$1" = "$_s" ] && return 0
+    done <<ALLOW_EOF
+$ALLOW_SAMPLES
+ALLOW_EOF
+    return 1
+}
+
+# ---------- 主流程 -----------------------------------------------------------
+files=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null)
+[ -z "$files" ] && exit 0
+
+blocked=0
+warned=0
+
+for f in $files; do
+    if is_sensitive_path "$f"; then
+        printf '\n  [X] 阻止提交：敏感文件进入暂存区 —— %s\n' "$f"
+        printf '      这类文件必须留在本机。\n'
+        printf '      处理：git restore --staged "%s"　并检查 .gitignore 是否被改动。\n' "$f"
+        blocked=1
+        continue
+    fi
+
+    is_binary_path "$f" && continue
+
+    content=$(git show ":$f" 2>/dev/null) || continue
+    [ -z "$content" ] && continue
+
+    # 先剔除带行级豁免标记的行，其余照常扫描
+    scan=$(printf '%s\n' "$content" | grep -vE "$EXEMPT_RE" 2>/dev/null)
+
+    # --- 硬拦：逐个匹配串判断，避免白名单误放行同一行里的真实密钥 ---
+    hits=$(printf '%s\n' "$scan" | grep -oE "$HARD" 2>/dev/null | sort -u)
+    real=""
+    for h in $hits; do
+        if is_allowed_sample "$h"; then
+            continue
+        fi
+        real="$real $h"
+    done
+
+    if [ -n "$real" ]; then
+        printf '\n  [X] 阻止提交：%s 中检测到疑似密钥\n' "$f"
+        for h in $real; do
+            short=$(printf '%s' "$h" | cut -c1-10)
+            printf '        · %s…（已截断，不完整回显）\n' "$short"
+        done
+        blocked=1
+    fi
+
+    # --- 软提醒：形如 api_key = "长串" 的硬编码赋值（不阻断，只说一声）---
+    if [ "$blocked" -eq 0 ]; then
+        soft=$(printf '%s\n' "$scan" | grep -nE "$SOFT" 2>/dev/null | head -3)
+        if [ -n "$soft" ]; then
+            printf '\n  [!] 提醒：%s 出现疑似硬编码凭据（未阻断）\n' "$f"
+            printf '%s\n' "$soft" | while IFS= read -r line; do
+                printf '        %s\n' "$line"
+            done
+            warned=1
+        fi
+    fi
+done
+
+if [ "$blocked" -ne 0 ]; then
+    cat <<'EOF'
+
+  --------------------------------------------------------------
+  提交已被拦下。请勿用 git commit --no-verify 绕过。
+
+  · 命中的若是测试夹具（假串）
+      登记完整串到 .githooks/pre-commit 的 ALLOW_SAMPLES，
+      或给那一行加注释： # secret-scan: allow
+
+  · 命中的若是真实密钥
+      1) 立刻去服务商控制台 轮换 / 吊销 该密钥 —— 视为已泄露；
+      2) 从代码里删除，改用运行时注入：
+           export DASHSCOPE_API_KEY=...     # 环境变量，不落盘
+         或打开 Atlas 的 /client 界面，在「密钥管理」面板里填（只存本机）；
+      3) 若它曾被提交过，git 历史里仍有残留，需要 filter-repo 清理。
+  --------------------------------------------------------------
+EOF
+    exit 1
+fi
+
+[ "$warned" -eq 1 ] && printf '\n  （以上仅为提醒，不影响本次提交）\n'
+
+exit 0
