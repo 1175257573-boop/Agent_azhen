@@ -46,24 +46,47 @@ const FAILURE_GUIDE = {
   NO_PYTHON: {
     title: '找不到可用的 Python 环境',
     body: '这个后端需要 Python 3.10+，并且把依赖装齐（fastapi / uvicorn / langchain）。',
-    suggest: () => [
-      '已按顺序尝试过下列位置，都没有成功：',
-      '  1) desktop/.atlas-desktop.json 中记录的解释器',
-      '  2) 环境变量 ATLAS_PYTHON',
-      '  3) 仓库内虚拟环境 .venv/',
-      '  4) 受管虚拟环境',
-      '  5) 系统 PATH 中的 python / py',
-      '',
-      '任选一种处理方式：',
-      '',
-      '【方式 A】在仓库根目录建虚拟环境并装依赖（推荐）',
-      '    python -m venv .venv',
-      '    .venv\\Scripts\\python.exe -m pip install -r requirements.txt',
-      '',
-      '【方式 B】已经有装好依赖的环境，直接告诉应用用哪个',
-      '    set ATLAS_PYTHON=D:\\path\\to\\python.exe',
-      '    然后重新启动本应用',
-    ].join('\n'),
+    suggest: (ctx) => {
+      const tried = [
+        '已按顺序尝试过下列位置，都没有成功：',
+        '  1) 上次成功使用的解释器（记在用户目录，不入库）',
+        '  2) 环境变量 ATLAS_PYTHON',
+        '  3) 后端目录下的虚拟环境 .venv/',
+        '  4) 受管虚拟环境',
+        '  5) 系统 PATH 中的 python / py',
+        '',
+      ];
+
+      // 安装版：外面没有仓库，指引必须能照着做，不能让人去找 .venv
+      if (ctx.packaged) {
+        return [
+          ...tried,
+          '这是安装版，应用自带的只有后端代码，Python 环境需要本机自备。',
+          '',
+          '【方式 A】装好 Python 后，用应用自带的依赖清单装依赖',
+          '    python -m pip install -r "' + (ctx.backendRoot || '') + '\\requirements.txt"',
+          '',
+          '【方式 B】如果已有装好依赖的环境，直接指定',
+          '    setx ATLAS_PYTHON "D:\\path\\to\\python.exe"',
+          '    然后重新启动本应用',
+          '',
+          '后端代码目录：' + (ctx.backendRoot || '(未知)'),
+        ].join('\n');
+      }
+
+      return [
+        ...tried,
+        '任选一种处理方式：',
+        '',
+        '【方式 A】在仓库根目录建虚拟环境并装依赖（推荐）',
+        '    python -m venv .venv',
+        '    .venv\\Scripts\\python.exe -m pip install -r requirements.txt',
+        '',
+        '【方式 B】已经有装好依赖的环境，直接告诉应用用哪个',
+        '    set ATLAS_PYTHON=D:\\path\\to\\python.exe',
+        '    然后重新启动本应用',
+      ].join('\n');
+    },
   },
   TIMEOUT: {
     title: '等待本地服务就绪超时',
@@ -84,7 +107,14 @@ const FAILURE_GUIDE = {
   },
 };
 
-function showFailure(code) {
+function showFailure(payload) {
+  const code = payload?.code;
+  // 打包与否决定指引怎么说：安装版外面没有仓库，不能让人去建 .venv
+  const ctx = {
+    packaged: Boolean(payload?.packaged),
+    backendRoot: payload?.backendRoot || '',
+  };
+
   const g = FAILURE_GUIDE[code] || {
     title: '启动失败',
     body: `未知错误（${code}）`,
@@ -95,7 +125,7 @@ function showFailure(code) {
   el.fail.hidden = false;
   el.failTitle.textContent = g.title;
   el.failBody.textContent = g.body;
-  el.failSuggest.textContent = typeof g.suggest === 'function' ? g.suggest() : g.suggest;
+  el.failSuggest.textContent = typeof g.suggest === 'function' ? g.suggest(ctx) : g.suggest;
   el.logBox.open = true;
 }
 
@@ -113,7 +143,7 @@ if (!bridge) {
     el.hint.textContent = `正在打开界面 · ${baseUrl}/client`;
   });
 
-  bridge.onFailed(({ code }) => showFailure(code));
+  bridge.onFailed((payload) => showFailure(payload));
 
   bridge.onBackendExit(({ code, signal }) => {
     if (el.fail.hidden === false) return; // 已经在报错了，别叠一层

@@ -30,12 +30,46 @@ const os = require('node:os');
 
 // ---------- 路径与常量 -------------------------------------------------------
 
-const REPO_ROOT = path.resolve(__dirname, '..');
+const DEV_ROOT = path.resolve(__dirname, '..');
 const APP_DIR = path.join(__dirname, 'app');
 const ASSETS_DIR = path.join(__dirname, 'assets');
 
-/** 本机覆盖配置（记录上次可用的解释器，不入库） */
-const SETTINGS_FILE = path.join(__dirname, '.atlas-desktop.json');
+/**
+ * 后端代码目录。
+ *
+ *   开发（electron . / npm start）→ 仓库根目录
+ *   打包后                        → 安装目录/resources/backend
+ *
+ * 打包后外面根本没有仓库，所以必须带上后端源码（见 package.json 的 extraResources）。
+ * 仓库那点代码才 1MB 出头，塞进包的代价可以忽略。
+ */
+function resolveBackendRoot() {
+  if (app.isPackaged) {
+    const bundled = path.join(process.resourcesPath, 'backend');
+    if (fs.existsSync(path.join(bundled, 'main.py'))) return bundled;
+    log('警告：未找到随包携带的后端代码，回退到安装目录附近查找');
+  }
+  return DEV_ROOT;
+}
+
+const BACKEND_ROOT = resolveBackendRoot();
+
+/**
+ * 本机覆盖配置（记录上次可用的解释器）。
+ *
+ * 打包后 `SETTINGS_FILE` 不能放在 __dirname —— 那是只读的 app.asar，写盘必然失败，
+ * 而失败又会被 readSettings/writeSettings 的 try 静默吞掉，表现为「每次都重新探测解释器」。
+ * 必须放到可写的用户目录。
+ */
+function resolveSettingsFile() {
+  try {
+    return path.join(app.getPath('userData'), '.atlas-desktop.json');
+  } catch {
+    return path.join(os.homedir(), '.atlas', 'desktop-settings.json');
+  }
+}
+
+const SETTINGS_FILE = resolveSettingsFile();
 /** 运行日志，出问题时让人有地方可查 */
 const LOG_FILE = path.join(os.homedir(), '.atlas', 'desktop.log');
 
@@ -117,14 +151,14 @@ function interpreterCandidates() {
   }
 
   const venvs = [
-    path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe'),
-    path.join(REPO_ROOT, '.venv', 'bin', 'python'),
-    path.join(REPO_ROOT, 'venv', 'Scripts', 'python.exe'),
-    path.join(REPO_ROOT, 'env', 'Scripts', 'python.exe'),
+    path.join(BACKEND_ROOT, '.venv', 'Scripts', 'python.exe'),
+    path.join(BACKEND_ROOT, '.venv', 'bin', 'python'),
+    path.join(BACKEND_ROOT, 'venv', 'Scripts', 'python.exe'),
+    path.join(BACKEND_ROOT, 'env', 'Scripts', 'python.exe'),
   ];
   for (const p of venvs) {
     if (fs.existsSync(p)) {
-      list.push({ cmd: p, args: [], label: `仓库内虚拟环境（${path.relative(REPO_ROOT, p)}）` });
+      list.push({ cmd: p, args: [], label: `仓库内虚拟环境（${path.relative(BACKEND_ROOT, p)}）` });
     }
   }
 
@@ -214,10 +248,10 @@ async function startBackend() {
   }
 
   const argv = [...py.args, 'main.py', 'web'];
-  log(`启动后端：${py.cmd} ${argv.join(' ')}（cwd=${REPO_ROOT}）`);
+  log(`启动后端：${py.cmd} ${argv.join(' ')}（cwd=${BACKEND_ROOT}）`);
 
   const proc = spawn(py.cmd, argv, {
-    cwd: REPO_ROOT,
+    cwd: BACKEND_ROOT,
     env: {
       ...process.env,
       ATLAS_DESKTOP: '1',        // 让后端知道自己在桌面壳里
@@ -285,8 +319,17 @@ function stopBackendSync() {
 // ---------- 窗口 -------------------------------------------------------------
 
 function iconImage() {
-  const p = path.join(ASSETS_DIR, 'icon.png');
-  return fs.existsSync(p) ? nativeImage.createFromPath(p) : undefined;
+  // 打包后优先用 resources 下的真实文件：asar 内路径在部分系统 API 里不可读，
+  // 会导致任务栏/Alt-Tab 图标回退成 Electron 默认图标。
+  if (app.isPackaged) {
+    const p = path.join(process.resourcesPath, 'icon.ico');
+    if (fs.existsSync(p)) return nativeImage.createFromPath(p);
+  }
+  for (const name of ['icon.ico', 'icon.png']) {
+    const p = path.join(ASSETS_DIR, name);
+    if (fs.existsSync(p)) return nativeImage.createFromPath(p);
+  }
+  return undefined;
 }
 
 function createWindow() {
@@ -414,7 +457,9 @@ function notYet(code) {
     win.webContents.send('desktop:failed', {
       code,
       logFile: LOG_FILE,
-      repoRoot: REPO_ROOT,
+      backendRoot: BACKEND_ROOT,
+      // 打包后外面没有仓库，失败指引得换一套说法（见 app/loading.js）
+      packaged: app.isPackaged,
     });
   }
 }
@@ -428,7 +473,8 @@ ipcMain.handle('desktop:status', async () => ({
   backendOwned: backend.owned,
   backendPid: backend.proc?.pid ?? null,
   logFile: LOG_FILE,
-  repoRoot: REPO_ROOT,
+  backendRoot: BACKEND_ROOT,
+  packaged: app.isPackaged,
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,

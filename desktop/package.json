@@ -7,33 +7,84 @@
   "scripts": {
     "start": "node scripts/launch.js",
     "dev": "node scripts/launch.js --dev",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win --x64",
+    "dist:portable": "electron-builder --win --x64 --target portable"
   },
   "author": "1175257573-boop",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^44.4.5"
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "cn.atlas.desktop",
     "productName": "Atlas 控制台",
+    "copyright": "Copyright © 2026 He Kezhen",
+    "directories": {
+      "output": "dist"
+    },
     "files": [
       "main.js",
       "preload.js",
       "app/**",
       "assets/**"
     ],
+    "extraResources": [
+      {
+        "from": "../agent_kit",
+        "to": "backend/agent_kit"
+      },
+      {
+        "from": "../server",
+        "to": "backend/server"
+      },
+      {
+        "from": "../static",
+        "to": "backend/static"
+      },
+      {
+        "from": "../main.py",
+        "to": "backend/main.py"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "backend/requirements.txt"
+      },
+      {
+        "from": "../pyproject.toml",
+        "to": "backend/pyproject.toml"
+      },
+      {
+        "from": "assets/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
     "win": {
       "target": [
-        "nsis",
-        "portable"
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
       ],
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "Atlas 控制台"
+      "perMachine": false,
+      "shortcutName": "Atlas 控制台",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "language": "2052",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-${arch}-便携版.${ext}"
     }
   }
 }
