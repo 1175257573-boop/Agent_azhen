@@ -11,12 +11,19 @@
     INFO   日常运行（默认）
     DEBUG  排查工具调用链路时打开，会打印每个中间件的进出
     WARNING 只关心异常与降级
+
+**所有日志输出都会先过一遍脱敏**（见 `redact.RedactingFormatter`）：
+API Key 无论以什么形式混进日志或异常堆栈，写出去的都是掩码。
+放在 Formatter 这一层是因为它拿到的是格式化完成的整串文本——
+Filter 管不到异常堆栈，而堆栈恰恰最容易把请求细节带出来。
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+
+from agent_kit.redact import RedactingFormatter
 
 DEFAULT_FORMAT = "%(asctime)s %(levelname)-7s %(name)-18s | %(message)s"
 DEFAULT_DATEFMT = "%H:%M:%S"
@@ -55,7 +62,8 @@ def setup_logging(
         root.removeHandler(handler)
 
     handler = logging.StreamHandler(stream or sys.stdout)
-    handler.setFormatter(logging.Formatter(DEFAULT_FORMAT, datefmt=DEFAULT_DATEFMT))
+    # RedactingFormatter：输出前统一脱敏，密钥不会随日志落盘
+    handler.setFormatter(RedactingFormatter(DEFAULT_FORMAT, datefmt=DEFAULT_DATEFMT))
     root.addHandler(handler)
 
     for lib in quiet_stdout_for:

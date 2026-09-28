@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Atlas 控制台 · LangChain 1.4 Agent</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/client.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ---------------------------------------------------------- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark">◈</div>
+      <div class="brand-text">
+        <h1>Atlas 控制台</h1>
+        <p>LangChain 1.4 · LangGraph · 仅监听本机</p>
+      </div>
+    </div>
+
+    <div class="pills">
+      <span class="pill" id="pillModel" title="当前使用的模型">
+        <i class="dot"></i><b>模型</b><span class="val">检测中…</span>
+      </span>
+      <span class="pill" id="pillKey" title="API Key 配置状态">
+        <i class="dot"></i><b>密钥</b><span class="val">检测中…</span>
+      </span>
+      <span class="pill" id="pillMem" title="记忆后端">
+        <i class="dot"></i><b>记忆</b><span class="val">检测中…</span>
+      </span>
+      <span class="pill" id="pillMcp" title="MCP 工具开关">
+        <i class="dot"></i><b>MCP</b><span class="val">关闭</span>
+      </span>
+    </div>
+
+    <div class="top-actions">
+      <a class="link" href="/" rel="noreferrer">原版界面</a>
+      <button class="btn ghost" id="btnKeys">密钥管理</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <!-- -------------------------------------------------------- 左栏 -->
+    <aside class="side">
+      <button class="btn primary block-btn" id="btnNewThread">＋ 新建会话</button>
+
+      <section class="block">
+        <h2>会话</h2>
+        <div class="threads" id="threads"></div>
+      </section>
+
+      <section class="block">
+        <h2>能力模式</h2>
+        <select id="mode"></select>
+        <p class="desc" id="modeDesc"></p>
+      </section>
+
+      <section class="block">
+        <h2>MCP 工具</h2>
+        <label class="switch">
+          <input type="checkbox" id="mcpToggle" />
+          <span>接入 MCP Server</span>
+        </label>
+        <div class="chips" id="mcpTools"><span class="hint">未连接</span></div>
+      </section>
+
+      <section class="block">
+        <h2>身份与权限</h2>
+        <input type="text" id="userId" value="demo" placeholder="user_id" />
+        <select id="role">
+          <option value="admin">admin · 可写文件</option>
+          <option value="user">user · 只读</option>
+        </select>
+      </section>
+    </aside>
+
+    <!-- -------------------------------------------------------- 中栏 -->
+    <main class="chat">
+      <div class="chat-head">
+        <span class="tid" id="threadLabel">atlas-main</span>
+        <span class="badge" id="modeBadge">chat</span>
+        <span class="grow"></span>
+        <button class="btn tiny ghost" id="btnReload">刷新历史</button>
+      </div>
+
+      <div class="stream" id="messages"></div>
+
+      <div class="composer">
+        <div class="queue" id="queue" hidden></div>
+        <div class="row">
+          <textarea id="input" rows="1" placeholder="输入消息，Enter 发送 · Shift+Enter 换行"></textarea>
+          <button class="send" id="btnSend">发送</button>
+        </div>
+        <p class="hint" id="composerHint">
+          会话与记忆落在 <code>~/.atlas</code>；写文件类操作会先找你确认。
+        </p>
+      </div>
+    </main>
+
+    <!-- -------------------------------------------------------- 右栏：密钥管理 -->
+    <aside class="inspector" id="inspector">
+      <div class="ins-head">
+        <h2>密钥管理</h2>
+        <span class="tag local">仅本机可访问</span>
+        <button class="icon-btn only-narrow" id="btnCloseIns" title="关闭">×</button>
+      </div>
+
+      <div class="ins-scroll">
+        <section class="card">
+          <div class="card-title">当前生效</div>
+          <label class="field" style="margin-bottom:10px">
+            <span class="label">本次对话使用的模型</span>
+            <select id="providerSelect"></select>
+          </label>
+          <div class="kv"><span class="k">密钥状态</span><span class="v" id="activeState">—</span></div>
+          <div class="kv"><span class="k">磁盘</span><span class="v muted" id="storageNote">—</span></div>
+          <p class="path mono" id="storagePath"></p>
+        </section>
+
+        <section class="card">
+          <div class="card-title">各 Provider</div>
+          <div class="cred-list" id="credList"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-title">新增 / 更新</div>
+
+          <label class="field">
+            <span class="label">Provider</span>
+            <select id="keyProvider"></select>
+          </label>
+
+          <label class="field">
+            <span class="label">API Key</span>
+            <div class="input-row">
+              <input type="password" id="keyInput" autocomplete="off" spellcheck="false"
+                     placeholder="粘贴密钥，形如 sk-…" />
+              <button class="icon-btn" id="btnEye" title="显示 / 隐藏输入">👁</button>
+            </div>
+          </label>
+
+          <label class="switch">
+            <input type="checkbox" id="keyRemember" />
+            <span>记住到本机（重启服务后仍生效）</span>
+          </label>
+
+          <div class="btn-row">
+            <button class="btn primary" id="btnSaveKey">保存并启用</button>
+            <button class="btn" id="btnVerify">测试连接</button>
+          </div>
+
+          <div class="result" id="keyResult" hidden></div>
+        </section>
+
+        <section class="card">
+          <div class="card-title">保密说明</div>
+          <ul class="notes" id="secretNotes"></ul>
+        </section>
+
+        <section class="card">
+          <div class="card-title">运行环境</div>
+          <div id="envInfo"></div>
+        </section>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/client.js"></script>
+</body>
+</html>

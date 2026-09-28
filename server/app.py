@@ -59,6 +59,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         log.warning("记忆后端预热失败（将降级为内存）：%s", exc)
 
+    # 载入本机凭据（若用户上次勾选了「记住到本机」）。
+    # 单独 try：凭据文件坏了只该让用户重填一次，不该拦住整个服务启动。
+    try:
+        from agent_kit import credentials as creds
+
+        loaded = creds.store.load_persisted()
+        if loaded:
+            log.info("已载入本机凭据：%s（来自 %s，仅注入进程环境变量）",
+                     "、".join(loaded), creds.store.path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("本机凭据载入失败（可在界面重新填写）：%s", exc)
+
     yield
 
     # 收尾：MCP 会拉起 stdio 子进程，不关就会残留
@@ -79,7 +91,7 @@ def create_app() -> FastAPI:
     )
 
     from server.errors import register_exception_handlers, register_request_logging
-    from server.routers import chat, memory, system
+    from server.routers import chat, credentials, memory, system
 
     # 顺序有讲究：先装异常处理器/日志，再挂路由
     register_exception_handlers(app)
@@ -88,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(chat.router)
     app.include_router(memory.router)
+    app.include_router(credentials.router)
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -95,6 +108,11 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     def index():
         return FileResponse(str(STATIC_DIR / "index.html"))
+
+    @app.get("/client", include_in_schema=False)
+    def client_console():
+        """客户端控制台：三栏布局 + 密钥管理面板（原 index.html 保持不动）。"""
+        return FileResponse(str(STATIC_DIR / "client.html"))
 
     return app
 
