@@ -164,18 +164,24 @@ class AgentService:
 
         用 `return` 而不是全局变量，是因为调用方（stream / resume）需要这个结果
         来决定要不要继续 drain——这是生成器 `return` 值最自然的用法（PEP 380）。
-        """
-        app = self.get(
-            mode=req.mode,
-            provider=req.provider,
-            user_id=req.user_id,
-            role=req.role,
-            thread_id=req.thread_id,
-        )
-        payload = self._payload(app, text)
-        interrupted = False
 
+        **装配必须放在 try 里面**：SSE 的响应头在生成器产出第一个事件之前就已经发出去了，
+        所以 `self.get(...)` 这一行如果在 try 之外抛错（典型场景：一个 Key 都没配，
+        `require_real_model` 直接拒绝启动），异常会逃出生成器——
+        客户端只会收到 200 加一个空响应体，页面上一片空白、日志里才有线索。
+        放进 try 之后，它才会变成一条正常的 `error` 事件送到前端。
+        """
+        interrupted = False
         try:
+            app = self.get(
+                mode=req.mode,
+                provider=req.provider,
+                user_id=req.user_id,
+                role=req.role,
+                thread_id=req.thread_id,
+            )
+            payload = self._payload(app, text)
+
             for kind, data in stream_events(
                 app.graph,
                 payload,
@@ -229,17 +235,17 @@ class AgentService:
                 return
 
     def resume(self, req: Any) -> Iterator[dict[str, Any]]:
-        """人工确认后继续执行。"""
-        app = self.get(
-            mode=req.mode,
-            provider=req.provider,
-            user_id=req.user_id,
-            role=req.role,
-            thread_id=req.thread_id,
-        )
+        """人工确认后继续执行。装配同样放在 try 内，理由见 `_run_one`。"""
         command = Command(resume={"decisions": req.decisions})
         interrupted = False
         try:
+            app = self.get(
+                mode=req.mode,
+                provider=req.provider,
+                user_id=req.user_id,
+                role=req.role,
+                thread_id=req.thread_id,
+            )
             for kind, data in stream_events(
                 app.graph,
                 command,
@@ -315,12 +321,13 @@ class AgentService:
                 yield event
 
     async def _arun_one(self, req: Any, text: str, queued_id: str | None = None):
-        app = await self.aget(
-            mode=req.mode, provider=req.provider, user_id=req.user_id,
-            role=req.role, thread_id=req.thread_id, enable_mcp=getattr(req, "enable_mcp", True),
-        )
-        payload = self._payload(app, text)
         try:
+            app = await self.aget(
+                mode=req.mode, provider=req.provider, user_id=req.user_id,
+                role=req.role, thread_id=req.thread_id, enable_mcp=getattr(req, "enable_mcp", True),
+            )
+            payload = self._payload(app, text)
+
             async for kind, data in astream_events(
                 app.graph,
                 payload,
@@ -347,7 +354,7 @@ class AgentService:
                     "pending": len(self._queues.get(req.thread_id)),
                 },
             }
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 —— 含装配失败，理由见 _run_one
             yield {"type": "error", "data": f"{type(exc).__name__}: {exc}"}
 
     async def _adrain(self, req: Any):
@@ -367,14 +374,14 @@ class AgentService:
                 return
 
     async def aresume(self, req: Any):
-        """MCP 场景下的人工确认恢复。"""
-        app = await self.aget(
-            mode=req.mode, provider=req.provider, user_id=req.user_id,
-            role=req.role, thread_id=req.thread_id, enable_mcp=getattr(req, "enable_mcp", True),
-        )
+        """MCP 场景下的人工确认恢复。装配同样放在 try 内，理由见 `_run_one`。"""
         command = Command(resume={"decisions": req.decisions})
         interrupted = False
         try:
+            app = await self.aget(
+                mode=req.mode, provider=req.provider, user_id=req.user_id,
+                role=req.role, thread_id=req.thread_id, enable_mcp=getattr(req, "enable_mcp", True),
+            )
             async for kind, data in astream_events(
                 app.graph, command,
                 modes=("messages", "updates", "custom"),
