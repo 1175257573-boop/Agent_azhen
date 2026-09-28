@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' file:; img-src file: data:; style-src 'self' 'unsafe-inline' file:; script-src 'self' file:">
+  <title>Atlas 控制台</title>
+  <link rel="stylesheet" href="loading.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">
+      <img class="logo" src="../assets/icon.png" alt="" width="56" height="56">
+      <div class="brand-text">
+        <h1>Atlas 控制台</h1>
+        <p class="sub">LangChain 1.4 · LangGraph · 全程本地运行</p>
+      </div>
+    </header>
+
+    <!-- 启动中 -->
+    <section class="stage" id="stage">
+      <div class="spinner" id="spinner" aria-hidden="true"></div>
+      <p class="status" id="status">正在启动本地服务…</p>
+      <p class="hint" id="hint">首次启动需要几秒，请稍候</p>
+    </section>
+
+    <!-- 失败态 -->
+    <section class="fail" id="fail" hidden>
+      <h2 id="failTitle">启动失败</h2>
+      <p id="failBody"></p>
+      <pre class="suggest" id="failSuggest"></pre>
+      <div class="actions">
+        <button id="btnRetry" type="button" class="primary">重试</button>
+        <button id="btnLog" type="button">打开日志文件</button>
+      </div>
+    </section>
+
+    <!-- 后端意外退出 -->
+    <section class="fail" id="gone" hidden>
+      <h2>后端服务已退出</h2>
+      <p>服务进程不在了，界面无法继续工作。</p>
+      <div class="actions">
+        <button id="btnRestart" type="button" class="primary">重启服务</button>
+        <button id="btnLog2" type="button">打开日志文件</button>
+      </div>
+    </section>
+
+    <details class="logs" id="logBox">
+      <summary>运行日志<span class="log-count" id="logCount"></span></summary>
+      <pre id="log"></pre>
+    </details>
+  </main>
+
+  <script src="loading.js"></script>
+</body>
+</html>

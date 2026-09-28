@@ -271,6 +271,35 @@ uvicorn server.app:app --reload    # 等价写法
 
 **PyCharm**：Script=`main.py`，Parameters=`chat`，Working dir=项目根，Interpreter=`.venv`。
 
+### 桌面客户端（Electron，可选）
+
+不想敲命令，双击即可：
+
+```
+desktop\start-silent.vbs      # 双击：无黑窗启动（推荐日常用）
+desktop\start.bat             # 双击：带控制台窗口，能直接看到启动日志
+```
+
+桌面壳做的事：自动找可用的 Python 解释器（仓库 `.venv` → `ATLAS_PYTHON` 环境变量 →
+上次成功的记录 → 系统 PATH，且会真跑一次 `import uvicorn, fastapi` 验证依赖齐不齐）→
+拉起 `main.py web` → 轮询就绪后在内嵌窗口打开 `/client` → **关窗口时把后端一并结束**，
+不留孤儿进程占端口。后端起不来时，启动页会显示原因和处理指引，而不是白屏；
+运行日志落在 `~/.atlas/desktop.log`。
+
+开发调试：
+
+```powershell
+cd desktop
+npm install            # 首次；Electron 二进制约 100MB，.npmrc 已配国内镜像
+npm start              # 内部走 scripts/launch.js
+npm run dist           # 打包安装包（需另行安装 electron-builder）
+```
+
+> 从 WorkBuddy / VS Code 这类本身是 Electron 的应用的终端里直接跑 `electron .`
+> 会静默挂起（宿主注入的 `ELECTRON_RUN_AS_NODE=1` 与 `NODE_OPTIONS` 所致），
+> 所以入口统一走 `npm start` / `start.bat`，由启动器剥掉污染变量、
+> 并以**绝对路径**传给 Electron（相对 `.` 在 Node spawn 下同样会让主进程挂起，实测）。
+
 ### 会话内命令
 
 ```

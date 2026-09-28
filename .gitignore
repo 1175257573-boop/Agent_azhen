@@ -55,6 +55,14 @@ credentials.json
 *.local.env
 *.secret
 
+# ---------- 桌面客户端（Electron，见 desktop/）----------
+# node_modules 约 380MB，且 Electron 二进制随平台不同，绝不能入库
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+# 本机记住的解释器路径，因机器而异，不入库
+desktop/.atlas-desktop.json
+
 # ---------- 操作系统 ----------
 .DS_Store
 Thumbs.db
