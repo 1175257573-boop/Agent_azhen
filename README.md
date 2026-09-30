@@ -153,6 +153,11 @@ langchain-v1.4-demo/
 ├── notes/                    ≈ src/main/resources（含 MCP 规范 / 接入笔记）
 ├── skills/                   ≈ 可复用的 Skill 包（mcp-integration）
 ├── runs/                     ≈ 运行时输出
+├── web/                      ≈ 前端工程（React + TypeScript + Vite）
+│   ├── src/pages/              ≈ 六个页面：聊天 / 审批 / 会话 / 队列 / 配置 / 记忆
+│   ├── src/api.ts              ≈ 后端 REST + SSE 客户端
+│   ├── src/store.tsx           ≈ 全局状态（会话配置 / 消息 / 审批 / 队列）
+│   └── dist/                   ≈ 构建产物（后端优先托管它）
 └── agent_kit/                ≈ com.xxx 业务包
     ├── config.py               ≈ @Configuration（密钥从环境变量读）
     ├── logging_conf.py         ≈ logback.xml
@@ -186,9 +191,10 @@ langchain-v1.4-demo/
 | Controller（Web） | `server/routers/*.py` |
 | Service（Web） | `server/service/*.py` |
 | Web 启动类 | `server/app.py` |
-| 前端页面 | `static/index.html` + `app.js` + `style.css` |
+| 前端托管 | `server/static_site.py`（新 SPA 优先，旧静态页兜底） |
+| 前端页面 | `web/`（React + TS + Vite 单页应用），旧版 `static/*.html` 保留 |
 | Interceptor / Filter | `agent_kit/middleware.py` |
-| DTO / Entity | `agent_kit/schemas.py`、`state.py` |
+| DTO / Entity | `agent_kit/schemas.py`、`state.py`、`server/schemas.py` |
 | `@Configuration` | `agent_kit/config.py` |
 | Bean 工厂 | `agent_kit/app.py` |
 | pom.xml | `pyproject.toml` / `requirements.txt` |
@@ -247,7 +253,7 @@ python main.py demo --real-memory        # 演示时改用真实的 Redis / Post
 > 否则每跑一次就往生产 Redis 里塞 `s1`~`s8` 这类一次性会话，污染 Web 端的会话列表。
 > 想验证真实记忆层请加 `--real-memory`，或直接跑 `examples/memory_e2e.py`。
 
-### Web 模式（FastAPI + 前端页面）
+### Web 模式（FastAPI + React 前端）
 
 ```powershell
 python main.py web                 # 默认 http://127.0.0.1:8000
@@ -255,19 +261,30 @@ python main.py web --port 9000 --reload
 uvicorn server.app:app --reload    # 等价写法
 ```
 
-打开 <http://127.0.0.1:8000> 即可用，接口文档在 `/docs`。
+打开 <http://127.0.0.1:8000> 即可用，接口文档在 `/docs`。前端是 React + TypeScript + Vite 的**单页应用**，六个页面：
 
-| 能力 | 位置 |
+| 页面 | 能力 |
 |---|---|
-| 流式打字机（SSE） | 中栏，`/api/chat/stream` |
-| 工具调用过程可视化 | 消息气泡下的 chip |
-| 人工确认（HITL） | 触发写文件时弹出审批卡，`/api/chat/resume` |
-| 会话列表 / 切换 / 删除 | 左栏，读 Redis |
-| 8 种能力模式切换 | 左栏下拉 |
-| 记忆层状态 | 右栏，实时显示 Redis / PG 后端 |
-| 长期偏好增删改 | 右栏，直接写长期记忆 store（默认 SQLite） |
+| 聊天 | SSE 流式打字机、工具调用过程可视化、审批卡片内联决策、忙碌时把输入转排队 |
+| 审批 | 汇总所有待人工确认的动作，支持批准 / 改参数 / 拒绝，提交后 Agent 继续 |
+| 会话 | 会话清单、切换、新建、删除（短期记忆以 thread_id 为主键） |
+| 队列 | 排队消息的查看 / 编辑 / 撤回 / 清空 |
+| 配置 | 能力模式、provider、身份权限、MCP 开关与工具列表、密钥管理（仅本机） |
+| 记忆 | 短期 / 长期后端状态、长期偏好增删改（按 user_id 隔离） |
 
-等价写法：`python -m agent_kit chat`、`.\\run.ps1 chat`、`agent-demo chat`（`pip install -e .` 后）。
+#### 前端开发
+
+```powershell
+cd web
+npm install
+npm run dev        # http://127.0.0.1:5173，/api 自动反代到本机 8000
+npm run build      # 产物 web/dist（tsc --noEmit + vite build）
+npm test           # 页面级测试：真的渲染组件、真的消费 SSE 流
+```
+
+后端优先托管 `web/dist`；**没构建过时自动退回旧版 `static/index.html`**，所以不构建也能跑，只是用的是旧界面。旧资源 `/static/**` 与旧控制台 `/client` 始终保留（桌面端打包依赖它们）。
+
+> 打包桌面端之前务必先 `npm run build`，否则打进去的是旧界面。
 
 **PyCharm**：Script=`main.py`，Parameters=`chat`，Working dir=项目根，Interpreter=`.venv`。
 
@@ -297,9 +314,15 @@ desktop\start.bat             # 双击：带控制台窗口，能直接看到启
 
 桌面壳做的事：自动找可用的 Python 解释器（仓库 `.venv` → `ATLAS_PYTHON` 环境变量 →
 上次成功的记录 → 系统 PATH，且会真跑一次 `import uvicorn, fastapi` 验证依赖齐不齐）→
-拉起 `main.py web` → 轮询就绪后在内嵌窗口打开 `/client` → **关窗口时把后端一并结束**，
-不留孤儿进程占端口。后端起不来时，启动页会显示原因和处理指引，而不是白屏；
-运行日志落在 `~/.atlas/desktop.log`。
+拉起 `main.py web` → 轮询就绪后在内嵌窗口打开根路径（新前端；没构建过就自动是旧版界面）→
+**关窗口时把后端一并结束**，不留孤儿进程占端口。后端起不来时，启动页会显示原因和处理指引，
+而不是白屏；运行日志落在 `~/.atlas/desktop.log`。
+
+打包前记得先构建前端，否则打进去的是旧界面：
+
+```powershell
+cd web && npm install && npm run build
+```
 
 开发调试：
 

@@ -43,6 +43,10 @@
         "to": "backend/static"
       },
       {
+        "from": "../web/dist",
+        "to": "backend/web/dist"
+      },
+      {
         "from": "../main.py",
         "to": "backend/main.py"
       },

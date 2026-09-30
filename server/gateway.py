@@ -22,17 +22,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from server.proxy import forward, forward_sse
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATIC_DIR = PROJECT_ROOT / "static"
 
 DEFAULT_AGENT_URL = "http://127.0.0.1:8001"
 DEFAULT_MEMORY_URL = "http://127.0.0.1:8002"
@@ -102,17 +96,10 @@ def create_gateway_app() -> FastAPI:
         suffix = f"/{rest}" if rest else ""
         return await forward(request, memory_url(), f"/api/memory{suffix}", upstream="memory")
 
-    # ---- 前端静态资源 ----
-    if STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    # ---- 前端静态资源（必须最后挂：含 SPA 的 /{full_path:path} 回落）----
+    from server.static_site import mount_frontend
 
-    @app.get("/", include_in_schema=False)
-    def index():
-        return FileResponse(str(STATIC_DIR / "index.html"))
-
-    @app.get("/client", include_in_schema=False)
-    def client_console():
-        return FileResponse(str(STATIC_DIR / "client.html"))
+    mount_frontend(app)
 
     return app
 

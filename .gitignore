@@ -60,6 +60,13 @@ credentials.json
 desktop/node_modules/
 desktop/dist/
 desktop/out/
+
+# ---------- 前端（web/，React + Vite）----------
+# node_modules 与构建产物都不入库：先 npm install && npm run build 再跑后端
+web/node_modules/
+web/dist/
+# Vite 加载 vite.config.ts 时产生的临时文件
+web/vite.config.ts.timestamp-*.mjs
 # 本机记住的解释器路径，因机器而异，不入库
 desktop/.atlas-desktop.json
 

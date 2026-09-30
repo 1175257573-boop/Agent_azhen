@@ -76,7 +76,11 @@ const LOG_FILE = path.join(os.homedir(), '.atlas', 'desktop.log');
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.ATLAS_PORT || 8000);
 const BASE_URL = `http://${HOST}:${PORT}`;
-const CLIENT_URL = `${BASE_URL}/client`;
+// 新前端（web/dist 构建产物）挂在根路径，SPA 自己做路由；
+// 没构建过时后端会退回旧的 static/index.html，两种情况下根路径都能开。
+const CLIENT_URL = `${BASE_URL}/`;
+/** 旧版三栏控制台，作为备用入口保留（后端 /client 一直挂着） */
+const LEGACY_URL = `${BASE_URL}/client`;
 
 /** 首次启动最多等后端多久（依赖冷启动 + SQLite 建表，给足余量） */
 const READY_TIMEOUT_MS = 120_000;
@@ -470,6 +474,7 @@ ipcMain.handle('desktop:status', async () => ({
   ready: await pingHealth(),
   baseUrl: BASE_URL,
   clientUrl: CLIENT_URL,
+  legacyUrl: LEGACY_URL,
   backendOwned: backend.owned,
   backendPid: backend.proc?.pid ?? null,
   logFile: LOG_FILE,

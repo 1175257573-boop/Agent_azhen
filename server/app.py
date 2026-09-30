@@ -17,21 +17,15 @@ from __future__ import annotations
 
 import warnings
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from server.deps import get_agent_service, get_memory_service
 from server.service.agent_service import AgentService
 from server.service.memory_service import MemoryService
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATIC_DIR = PROJECT_ROOT / "static"
 
 __all__ = ["app", "create_app", "get_agent_service", "get_memory_service"]
 
@@ -93,17 +87,10 @@ def create_app() -> FastAPI:
     app.include_router(memory.router)
     app.include_router(credentials.router)
 
-    if STATIC_DIR.exists():
-        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    # 前端托管必须最后挂：里面有 /{full_path:path} 的 SPA 回落
+    from server.static_site import mount_frontend
 
-    @app.get("/", include_in_schema=False)
-    def index():
-        return FileResponse(str(STATIC_DIR / "index.html"))
-
-    @app.get("/client", include_in_schema=False)
-    def client_console():
-        """客户端控制台：三栏布局 + 密钥管理面板（原 index.html 保持不动）。"""
-        return FileResponse(str(STATIC_DIR / "client.html"))
+    mount_frontend(app)
 
     return app
 
