@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/memory", tags=["memory"])
 
 
 def _svc():
-    from server.app import get_memory_service
+    from server.deps import get_memory_service
 
     return get_memory_service()
 

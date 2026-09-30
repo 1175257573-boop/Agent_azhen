@@ -26,23 +26,14 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from server.deps import get_agent_service, get_memory_service
 from server.service.agent_service import AgentService
 from server.service.memory_service import MemoryService
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 
-# 进程级单例（≈ Spring 的 Bean 容器）
-_agent_service = AgentService()
-_memory_service = MemoryService()
-
-
-def get_agent_service() -> AgentService:
-    return _agent_service
-
-
-def get_memory_service() -> MemoryService:
-    return _memory_service
+__all__ = ["app", "create_app", "get_agent_service", "get_memory_service"]
 
 
 @asynccontextmanager
@@ -75,7 +66,7 @@ async def lifespan(app: FastAPI):
 
     # 收尾：MCP 会拉起 stdio 子进程，不关就会残留
     try:
-        await _agent_service.aclose_mcp()
+        await get_agent_service().aclose_mcp()
     except Exception as exc:  # noqa: BLE001
         log.warning("关闭 MCP 连接失败：%s: %s", type(exc).__name__, exc)
     else:

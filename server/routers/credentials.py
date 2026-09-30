@@ -83,7 +83,7 @@ async def _invalidate_agents() -> None:
     用户会看到"我明明改了 Key，怎么还在报鉴权失败"。
     MCP 那份要额外关掉——每条连接都挂着一个 stdio 子进程，只清缓存会漏进程。
     """
-    from server.app import get_agent_service
+    from server.deps import get_agent_service
 
     svc = get_agent_service()
     try:

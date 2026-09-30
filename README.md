@@ -271,6 +271,21 @@ uvicorn server.app:app --reload    # 等价写法
 
 **PyCharm**：Script=`main.py`，Parameters=`chat`，Working dir=项目根，Interpreter=`.venv`。
 
+### 三进程部署（网关 + Agent 执行 + 记忆服务，可选）
+
+开发和日常用单体（上面的 Web 模式）就够了。要把服务拆成三个进程时：
+
+```powershell
+python -m server.agent_app  --port 8001   # Agent 执行服务：跑图 / 审批 / 排队 / 凭据
+python -m server.memory_app --port 8002   # 记忆服务：偏好 / 状态 / 会话清单
+python -m server.gateway    --port 8000   # 网关：对外唯一入口，转发 + 前端静态资源
+```
+
+- 网关按路径转发：`/api/chat/**`、`/api/credentials/**` → Agent 服务；`/api/memory/**` → 记忆服务；SSE 逐 chunk 转发，不缓冲。
+- 下游地址用环境变量覆盖：`AGENT_SERVICE_URL` / `MEMORY_SERVICE_URL`。
+- 下游不可达时网关一律回 **502 JSON**（绝不「200 + 空响应体」），`/api/health` 会聚合两个下游的存活状态。
+- 会话存储（checkpointer / store）是共享后端，Agent 与记忆服务各自直连，互不依赖。
+
 ### 桌面客户端（Electron，可选）
 
 不想敲命令，双击即可：

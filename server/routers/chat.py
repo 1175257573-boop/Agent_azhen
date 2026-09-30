@@ -23,7 +23,7 @@ HEARTBEAT = 15.0
 
 
 def _svc() -> AgentService:
-    from server.app import get_agent_service
+    from server.deps import get_agent_service
 
     return get_agent_service()
 
@@ -153,7 +153,7 @@ def history(thread_id: str, mode: str = "chat", provider: str | None = None, use
 
 @router.get("/threads", response_model=list[ThreadBrief])
 def threads():
-    from server.app import get_memory_service
+    from server.deps import get_memory_service
 
     return [
         ThreadBrief(thread_id=t["thread_id"], message_count=t.get("message_count", 0))

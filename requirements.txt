@@ -28,6 +28,8 @@ tomli>=2.0; python_version < "3.11"
 # Web 框架（FastAPI + ASGI 服务器）
 fastapi==0.141.1
 uvicorn[standard]==0.53.0
+# 网关到下游服务的转发（SSE 逐 chunk 转发需要流式 HTTP 客户端）
+httpx==0.28.1
 
 # 可选：读取项目根目录的 .env 兜底环境变量（缺失则静默跳过，不影响运行）
 python-dotenv==1.2.3
