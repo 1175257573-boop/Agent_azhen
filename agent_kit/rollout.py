@@ -104,6 +104,7 @@ def _role_of(message: Any) -> str:
     return type(message).__name__.replace("Message", "").lower() or "unknown"
 
 
+@db.with_retry
 def append(
     thread_id: str,
     messages: Iterable[Any],
@@ -141,6 +142,7 @@ def append(
         conn.close()
 
 
+@db.with_retry
 def sync_from_checkpoint(
     graph: Any,
     thread_id: str,
@@ -253,6 +255,7 @@ def export(thread_id: str, path: str | Path, *, db_path: str | Path | None = Non
     return len(records)
 
 
+@db.with_retry
 def clear(thread_id: str, *, db_path: str | Path | None = None) -> int:
     """删掉一个会话的流水，返回删除条数。"""
     conn = _connect(db_path)

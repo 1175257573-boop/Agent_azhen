@@ -207,6 +207,7 @@ def _default_owner() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+@db.with_retry
 def save(record: MemoryRecord, *, db_path: str | Path | None = None) -> None:
     """写入/更新一条记忆（用 thread_id 做主键，同一会话重复抽取即覆盖）。"""
     conn = _connect(db_path)
@@ -254,6 +255,7 @@ def all_records(*, db_path: str | Path | None = None) -> list[MemoryRecord]:
         conn.close()
 
 
+@db.with_retry
 def mark_used(thread_id: str, *, db_path: str | Path | None = None) -> None:
     """记一次使用：Phase 2 靠 usage_count / last_usage 排序与裁剪。"""
     conn = _connect(db_path)
@@ -326,6 +328,7 @@ def _backoff_seconds(attempts: int) -> float | None:
     return float(_BACKOFF_SECONDS[min(attempts, len(_BACKOFF_SECONDS)) - 1])
 
 
+@db.with_retry
 def claim(
     thread_id: str,
     *,
@@ -398,6 +401,7 @@ def claim(
         conn.close()
 
 
+@db.with_retry
 def release(thread_id: str, owner: str, *, db_path: str | Path | None = None) -> bool:
     """主动归还 lease（还没干完就退出时调用）。只放自己持有的锁。"""
     conn = _connect(db_path)
@@ -413,6 +417,7 @@ def release(thread_id: str, owner: str, *, db_path: str | Path | None = None) ->
         conn.close()
 
 
+@db.with_retry
 def mark_done(
     thread_id: str, owner: str, source_digest: str, *, db_path: str | Path | None = None
 ) -> None:
@@ -433,6 +438,7 @@ def mark_done(
         conn.close()
 
 
+@db.with_retry
 def mark_failed(
     thread_id: str, owner: str, error: str, *, db_path: str | Path | None = None
 ) -> int:
@@ -465,6 +471,7 @@ def mark_failed(
         conn.close()
 
 
+@db.with_retry
 def reset_lease(thread_id: str, *, db_path: str | Path | None = None) -> bool:
     """清空一条会话的抽取台账（重跑整条会话用）。返回是否真删了。"""
     conn = _connect(db_path)
@@ -492,6 +499,7 @@ def _rollout_digest(records: list[dict[str, Any]]) -> str:
 # 两个进程同时合并会互相覆盖，还可能各写一版 MEMORY.md。
 # Codex 的做法是"改产物前先抢一把全局锁"，这里照做，机制与 Phase 1 同源（DB 里的带过期 lease）。
 # ---------------------------------------------------------------------------
+@db.with_retry
 def claim_global_lock(
     name: str = PHASE2_LOCK,
     *,
@@ -531,6 +539,7 @@ def claim_global_lock(
         conn.close()
 
 
+@db.with_retry
 def release_global_lock(
     name: str, owner: str, *, db_path: str | Path | None = None
 ) -> bool:

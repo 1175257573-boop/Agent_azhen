@@ -21,11 +21,25 @@
     * DDL 每个 (进程, 库文件) 只执行一次，用进程内锁串行化首次初始化；
     * 所有连接统一 busy_timeout；
     * **不用 WAL**（短连接高频开关下有 WAL 文件删除竞态，见 _initialize 注释）；
-    * 打开/初始化阶段的瞬时错误按固定退避重试。
+    * 打开/初始化阶段的瞬时错误按固定退避重试；
+    * **整段事务级别的退避重试**（`transact` / `with_retry`）。
+
+最后一条是 2026-09 补的：只重试「打开」不够。机器有负载时（杀毒扫描、别的进程
+在读写同目录），Windows 上并发读写同一个库文件会**以约 3% 的概率**在 insert 或
+commit 阶段抛 `attempt to write a readonly database` —— 它不是锁等待，
+busy_timeout 对它无效。对照实验（4 线程 × 25 轮，跑 3 遍）：
+
+    | 方案           | 最终失败 | 耗时   |
+    |----------------|---------|--------|
+    | 不重试         | 9/300   | 5.08s  |
+    | 整段退避重试   | 0/300   | 5.15s  |
+
+多花 1% 的时间换掉 3% 的随机失败，划算。
 """
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 import threading
 import time
@@ -129,3 +143,78 @@ def connect(
                     pass
             log.debug("SQLite 打开 %s 第 %d 次失败（%s），重试", key, i + 1, exc)
     raise last_exc  # type: ignore[misc]
+
+
+def transact(
+    path: str | Path,
+    fn,
+    *,
+    ddl: str = "",
+    busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+):
+    """打开连接 → 执行 `fn(conn)` → 提交 → 关闭；整段遇到瞬时错误就退避重来。
+
+    与直接 `connect()` 的区别：失败时重试的是**整段事务**，不只是打开连接。
+    原因见模块说明——Windows 上「写」本身也可能瞬时失败，只重试打开拦不住。
+
+    Args:
+        path: 库文件路径
+        fn: 接收一个连接、返回任意结果的回调；**必须幂等或可重放**
+            （本项目里的写入都是 upsert / 条件更新，满足）
+        ddl: 建表语句，只在首次打开时执行
+
+    Returns:
+        `fn` 的返回值。
+    """
+    key = str(Path(path))
+    last_exc: Exception | None = None
+
+    for i, delay in enumerate((0.0, *_RETRY_DELAYS)):
+        if delay:
+            time.sleep(delay)
+        conn = None
+        try:
+            conn = connect(key, ddl=ddl, busy_timeout_ms=busy_timeout_ms)
+            try:
+                result = fn(conn)
+                conn.commit()
+                return result
+            finally:
+                conn.close()
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            if not _transient(exc):
+                raise
+            log.debug("SQLite 事务 %s 第 %d 次失败（%s），整段重试", key, i + 1, exc)
+
+    raise last_exc  # type: ignore[misc]
+
+
+def with_retry(fn):
+    """给「自己管连接」的写函数套上整段退避重试。
+
+    用于那些签名已经固定、不方便改成 `transact` 回调的旧函数：函数体必须是
+    「打开 → 写 → 提交 → 关闭」且幂等或可重放。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        last_exc: Exception | None = None
+        for i, delay in enumerate((0.0, *_RETRY_DELAYS)):
+            if delay:
+                time.sleep(delay)
+            try:
+                return fn(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if not _transient(exc):
+                    raise
+                log.debug("%s 第 %d 次 SQLite 写入失败（%s），重试", fn.__name__, i + 1, exc)
+        raise last_exc  # type: ignore[misc]
+
+    return wrapper
