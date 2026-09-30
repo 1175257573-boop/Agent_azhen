@@ -26,9 +26,13 @@ from typing import Any
 
 from agent_kit.app import MODE_HELP, AppConfig, build_app, build_app_async
 from agent_kit.logging_conf import get_logger
-from agent_kit.streaming import astream_events, stream_events, text_of_message
+from agent_kit.runtime import AgentRuntime
+from agent_kit.streaming import text_of_message
 
 log = get_logger("agent.chat")
+
+# 一次回复可能连着触发多个待审批项，问完再跑又可能再触发；给个上限防死循环
+_MAX_APPROVAL_ROUNDS = 5
 
 HELP = """\
 可用命令：
@@ -213,148 +217,101 @@ class ChatSession:
         return False
 
     # ------------------------------------------------------------ 对话
+    def runtime(self) -> AgentRuntime:
+        """本次执行用的运行层。每次现取——app 会在 /mode、/mcp 之后被换掉。"""
+        return AgentRuntime(self.app, source=self.source)
+
     def _talk(self, text: str) -> None:
-        graph = self.app.graph
-        payload: Any
-        if self.app.is_workflow:
-            payload = {"query": text}
-        else:
-            payload = {"messages": [{"role": "user", "content": text}]}
+        """跑一轮：执行交给运行层，这里只负责把事件渲染成终端文本。"""
+        thread_id = self.cfg.thread_id
+        runtime = self.runtime()
+        self._pending = []
 
         try:
             if self.app.is_mcp:
                 # MCP 工具没有同步实现，整条链路都得走异步（且复用同一 loop）
-                self._pending = []
-                self.event_loop.run_until_complete(self._astream(graph, payload))
-                if self._pending:
-                    decisions = self._ask_decisions(self._pending)
-                    if decisions:
-                        self.event_loop.run_until_complete(self._aresume(graph, decisions))
+                self.event_loop.run_until_complete(self._render(runtime.arun(text, thread_id)))
             elif self.streaming:
-                self._stream(graph, payload)
+                self._render(runtime.run(text, thread_id))
             else:
-                self._invoke(graph, payload)
+                self._render_invoke(runtime, text, thread_id)
+
+            self._settle(runtime, thread_id)
         except KeyboardInterrupt:
             print("\n（已中断本次回答）")
         except Exception as exc:  # noqa: BLE001
             print(f"\n[出错] {type(exc).__name__}: {exc}\n")
-        finally:
-            self._record_rollout()
 
-    def _record_rollout(self) -> None:
-        """本轮结束后把会话流水增量落盘（失败也不能影响对话本身）。"""
-        try:
-            from agent_kit import rollout
-
-            rollout.sync_from_checkpoint(
-                self.app.graph,
-                self.app.config.thread_id,
-                config=self.app.thread_config,
-                source=self.source,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.debug("会话流水落盘失败（已忽略）：%s: %s", type(exc).__name__, exc)
-
-    def _stream(self, graph: Any, payload: Any) -> None:
+    # ------------------------------------------------------------ 渲染
+    def _render(self, events: Any) -> None:
+        """把运行层事件打印成终端文本；中断先攒着，跑完再统一问用户。"""
         print("\nAtlas > ", end="", flush=True)
         printed = False
-        for kind, data in stream_events(
-            graph,
-            payload,
-            modes=("messages", "updates", "custom"),
-            config=self.app.thread_config,
-            context=self.app.context,
-        ):
-            if kind == "messages":
-                token, _meta = data if isinstance(data, tuple) else (data, None)
-                piece = text_of_message(token)
-                if piece:
-                    print(piece, end="", flush=True)
-                    printed = True
+        for event in events:
+            kind = event["type"]
+            if kind == "token":
+                print(event["data"], end="", flush=True)
+                printed = True
             elif kind == "custom":
-                print(f"\n  · {data}", end="", flush=True)
-            elif kind == "updates":
-                interrupts = _extract_interrupts(data)
-                if interrupts:
-                    print()
-                    handled = self._handle_hitl(graph, interrupts)
-                    if handled:
-                        printed = True
+                print(f"\n  · {event['data']}", end="", flush=True)
+                printed = True
+            elif kind == "interrupt":
+                print()
+                self._pending.extend(event["data"])
+                printed = True
+            elif kind == "error":
+                print(f"\n[出错] {event['data']}", end="", flush=True)
+                printed = True
         print("\n" if printed else "(无输出)\n")
 
-    async def _astream(self, graph: Any, payload: Any) -> None:
-        """MCP 场景的流式输出：与 _stream 逻辑一致，只是每步 await。
+    def _render_invoke(self, runtime: AgentRuntime, text: str, thread_id: str) -> None:
+        """非流式的整段输出（/stream 关掉时走这条）。"""
+        out = runtime.invoke(text, thread_id)
+        if out.get("error"):
+            print(f"\n[出错] {out['error']}\n")
+            return
 
-        人工审批不能在协程里 `input()`（会阻塞整个事件循环），
-        所以先把 interrupt 收集到 self._pending，等这轮跑完再统一问用户。
-        """
-        print("\nAtlas > ", end="", flush=True)
-        printed = False
-        async for kind, data in astream_events(
-            graph,
-            payload,
-            modes=("messages", "updates", "custom"),
-            config=self.app.thread_config,
-            context=self.app.context,
-        ):
-            if kind == "messages":
-                token = data[0] if isinstance(data, tuple) else data
-                piece = text_of_message(token)
-                if piece:
-                    print(piece, end="", flush=True)
-                    printed = True
-            elif kind == "custom":
-                print(f"\n  · {data}", end="", flush=True)
-            elif kind == "updates":
-                for value in (data or {}).values():
-                    if isinstance(value, dict) and value.get("__interrupt__"):
-                        self._pending.extend(i.value if hasattr(i, "value") else i
-                                             for i in value["__interrupt__"])
-        print("\n" if printed else "(无输出)\n")
-
-    async def _aresume(self, graph: Any, decisions: list[dict]) -> None:
-        """人工决策后异步恢复执行。"""
-        from langgraph.types import Command
-
-        print()
-        printed = False
-        async for kind, data in astream_events(
-            graph,
-            Command(resume={"decisions": decisions}),
-            modes=("messages", "updates", "custom"),
-            config=self.app.thread_config,
-            context=self.app.context,
-        ):
-            if kind == "messages":
-                token = data[0] if isinstance(data, tuple) else data
-                piece = text_of_message(token)
-                if piece:
-                    print(piece, end="", flush=True)
-                    printed = True
-        print("\n" if printed else "(无输出)\n")
-
-    def _invoke(self, graph: Any, payload: Any) -> None:
-        result = graph.invoke(payload, config=self.app.thread_config, context=self.app.context)
-        if self.app.is_workflow:
+        result = out["result"] or {}
+        if getattr(self.app, "is_workflow", False):
             print(f"\nAtlas > {result.get('final_answer', '')}\n")
             return
 
-        interrupts = result.get("__interrupt__")
-        if interrupts:
-            self._handle_hitl(graph, [i.value for i in interrupts])
+        self._pending = list(out["interrupts"])
+        if self._pending:
+            print()
             return
 
-        last = result["messages"][-1]
-        print(f"\nAtlas > {text_of_message(last)}\n")
+        if result.get("messages"):
+            print(f"\nAtlas > {text_of_message(result['messages'][-1])}\n")
+        self._print_structured(result)
 
+    @staticmethod
+    def _print_structured(result: dict) -> None:
         structured = result.get("structured_response")
-        if structured is not None:
-            print("  —— 结构化输出 ——")
-            print(f"  标题   ：{structured.title}")
-            print(f"  置信度 ：{structured.confidence:.0%}")
-            for item in structured.key_findings:
-                print(f"   · {item.fact}（来源：{item.source}）")
-            print()
+        if structured is None:
+            return
+        print("  —— 结构化输出 ——")
+        print(f"  标题   ：{structured.title}")
+        print(f"  置信度 ：{structured.confidence:.0%}")
+        for item in structured.key_findings:
+            print(f"   · {item.fact}（来源：{item.source}）")
+        print()
+
+    def _settle(self, runtime: AgentRuntime, thread_id: str) -> None:
+        """把攒下的中断逐轮问完（一次回复可能连着触发多个待审批项）。"""
+        for _ in range(_MAX_APPROVAL_ROUNDS):
+            if not self._pending:
+                return
+            decisions = self._ask_decisions(self._pending)
+            self._pending = []
+            if not decisions:
+                return
+            if self.app.is_mcp:
+                self.event_loop.run_until_complete(
+                    self._render(runtime.aresume(decisions, thread_id))
+                )
+            else:
+                self._render(runtime.resume(decisions, thread_id))
 
     # ------------------------------------------------------------ 人工确认
     def _ask_decisions(self, values: list[Any]) -> list[dict]:
@@ -390,29 +347,6 @@ class ChatSession:
 
         return decisions
 
-    def _handle_hitl(self, graph: Any, values: list[Any]) -> bool:
-        """同步链路的人工审批：问完决策立刻用 Command(resume=...) 恢复执行。"""
-        from langgraph.types import Command
-
-        decisions = self._ask_decisions(values)
-        if not decisions:
-            return False
-
-        try:
-            resumed = graph.invoke(
-                Command(resume={"decisions": decisions}),
-                config=self.app.thread_config,
-                context=self.app.context,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[恢复失败] {type(exc).__name__}: {exc}")
-            return False
-
-        if isinstance(resumed, dict) and resumed.get("messages"):
-            print(f"\nAtlas > {text_of_message(resumed['messages'][-1])}\n")
-        return True
-
-
 # ---------------------------------------------------------------------------
 # 小工具
 # ---------------------------------------------------------------------------
@@ -422,16 +356,6 @@ def _tool_names(graph: Any) -> list[str]:
         return sorted(getattr(node.data, "tools_by_name", {}).keys()) if node else []
     except Exception:  # noqa: BLE001
         return []
-
-
-def _extract_interrupts(data: Any) -> list[Any]:
-    """从 updates 事件里挑出 interrupt 载荷。"""
-    found = []
-    if isinstance(data, dict):
-        for value in data.values():
-            if isinstance(value, dict) and "action_requests" in value:
-                found.append(value)
-    return found
 
 
 def print_banner(settings: Any, cfg: AppConfig) -> None:
