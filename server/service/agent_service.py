@@ -7,6 +7,7 @@ Controller 只负责协议（HTTP/SSE），不碰 LangChain 细节。
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -14,6 +15,8 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from agent_kit import memory as mem
+from agent_kit import rollout
 from agent_kit.app import MODE_HELP, AppConfig, BuiltApp, build_app, build_app_async
 from agent_kit.message_queue import QueueRegistry
 from agent_kit.streaming import astream_events, stream_events, text_of_message
@@ -32,6 +35,9 @@ class AgentService:
     def __init__(self) -> None:
         self._apps: dict[AppKey, BuiltApp] = {}
         self._locks: dict[AppKey, Any] = {}
+        # 同步装配锁：SSE 生成器跑在线程池里，两个请求可能同时走 get()
+        # 重复装配同一份应用（MCP 场景还会拉起两个 Server 子进程）
+        self._build_lock = threading.Lock()
         # 排队消息：Agent 忙碌期间的用户输入缓存在这里，本轮结束后自动发出
         self._queues = QueueRegistry()
 
@@ -76,13 +82,23 @@ class AgentService:
         key = self._key(mode, provider, user_id, role, enable_mcp)
         app = self._apps.get(key)
         if app is None:
-            cfg = self._cfg(mode=mode, provider=provider, user_id=user_id, role=role, thread_id=thread_id, enable_mcp=enable_mcp)
-            if cfg.needs_mcp:
-                raise RuntimeError("该配置含 MCP 工具，请用 await aget() 异步装配")
-            app = build_app(cfg)
-            self._apps[key] = app
-        app.config.thread_id = thread_id
+            with self._build_lock:
+                app = self._apps.get(key)
+                if app is None:
+                    cfg = self._cfg(mode=mode, provider=provider, user_id=user_id, role=role, thread_id=thread_id, enable_mcp=enable_mcp)
+                    if cfg.needs_mcp:
+                        raise RuntimeError("该配置含 MCP 工具，请用 await aget() 异步装配")
+                    app = build_app(cfg)
+                    self._apps[key] = app
+        # ⚠️ 不要把 thread_id 写回共享的 app.config：缓存的 BuiltApp 是跨会话共享的，
+        # 并发请求互相覆盖 thread_id 曾导致「A 的消息写进 B 的会话」（会话隔离被打破）。
+        # thread 只在每次执行时显式传入，见 _config_for()。
         return app
+
+    @staticmethod
+    def _config_for(app: BuiltApp, thread_id: str) -> dict:
+        """按本次请求的 thread_id 构造执行配置（不触碰共享的 BuiltApp 状态）。"""
+        return mem.thread_config(thread_id)
 
     async def aget(self, *, mode: str, provider: str | None, user_id: str, role: str, thread_id: str, enable_mcp: bool = True) -> BuiltApp:
         """异步装配（含 MCP）。用锁避免并发时拉起多个 MCP Server 进程。"""
@@ -91,7 +107,6 @@ class AgentService:
         key = self._key(mode, provider, user_id, role, enable_mcp)
         app = self._apps.get(key)
         if app is not None:
-            app.config.thread_id = thread_id
             return app
 
         lock = self._locks.setdefault(key, asyncio.Lock())
@@ -99,9 +114,7 @@ class AgentService:
             if key not in self._apps:
                 cfg = self._cfg(mode=mode, provider=provider, user_id=user_id, role=role, thread_id=thread_id, enable_mcp=enable_mcp)
                 self._apps[key] = await build_app_async(cfg)
-        app = self._apps[key]
-        app.config.thread_id = thread_id
-        return app
+        return self._apps[key]
 
     def apps(self) -> list[BuiltApp]:
         return list(self._apps.values())
@@ -172,6 +185,7 @@ class AgentService:
         放进 try 之后，它才会变成一条正常的 `error` 事件送到前端。
         """
         interrupted = False
+        app: BuiltApp | None = None
         try:
             app = self.get(
                 mode=req.mode,
@@ -181,12 +195,13 @@ class AgentService:
                 thread_id=req.thread_id,
             )
             payload = self._payload(app, text)
+            config = self._config_for(app, req.thread_id)
 
             for kind, data in stream_events(
                 app.graph,
                 payload,
                 modes=("messages", "updates", "custom"),
-                config=app.thread_config,
+                config=config,
                 context=app.context,
             ):
                 if kind == "messages":
@@ -212,8 +227,28 @@ class AgentService:
             }
         except Exception as exc:  # noqa: BLE001
             yield {"type": "error", "data": f"{type(exc).__name__}: {exc}"}
+        finally:
+            # Web 会话也要落流水：之前只有 CLI 落，导致记忆 Phase 1 永远看不到 Web 对话
+            self._record_rollout(app, req.thread_id, source="chat")
 
         return interrupted
+
+    @staticmethod
+    def _record_rollout(app: BuiltApp | None, thread_id: str, *, source: str) -> None:
+        """把本轮对话增量落进会话流水（失败不能影响对话本身）。"""
+        if app is None:
+            return
+        try:
+            rollout.sync_from_checkpoint(
+                app.graph,
+                thread_id,
+                config=mem.thread_config(thread_id),
+                source=source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from agent_kit.logging_conf import get_logger
+
+            get_logger("web.agent").debug("会话流水落盘失败（已忽略）：%s: %s", type(exc).__name__, exc)
 
     def _drain(self, req: Any) -> Iterator[dict[str, Any]]:
         """把排队中的消息按先进先出依次执行完（复用同一条 SSE 连接）。
@@ -250,7 +285,7 @@ class AgentService:
                 app.graph,
                 command,
                 modes=("messages", "updates", "custom"),
-                config=app.thread_config,
+                config=self._config_for(app, req.thread_id),
                 context=app.context,
             ):
                 if kind == "messages":
@@ -281,13 +316,19 @@ class AgentService:
         """把图节点的状态增量翻译成前端看得懂的事件。"""
         if not isinstance(data, dict):
             return
+        # 人工介入：LangGraph 把中断放在 **chunk 顶层**（值是 Interrupt 元组，不是 dict）。
+        # 早期实现只遍历 data.values() 且要求 isinstance(value, dict)，
+        # 顶层那条就被静默跳过——前端永远收不到审批卡片。
+        if interrupts := data.get("__interrupt__"):
+            yield {"type": "interrupt", "data": [getattr(i, "value", i) for i in interrupts]}
+            return
         for value in data.values():
             if not isinstance(value, dict):
                 continue
-            # 人工介入：LangGraph 把中断放在 __interrupt__ 里
+            # 子图 / 节点内也可能带中断，两种形状都认
             if interrupts := value.get("__interrupt__"):
-                payload = [getattr(i, "value", i) for i in interrupts]
-                yield {"type": "interrupt", "data": payload}
+                yield {"type": "interrupt", "data": [getattr(i, "value", i) for i in interrupts]}
+                continue
             for msg in value.get("messages", []) or []:
                 if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
                     for call in msg.tool_calls:
@@ -332,7 +373,7 @@ class AgentService:
                 app.graph,
                 payload,
                 modes=("messages", "updates", "custom"),
-                config=app.thread_config,
+                config=self._config_for(app, req.thread_id),
                 context=app.context,
             ):
                 if kind == "messages":
@@ -385,7 +426,7 @@ class AgentService:
             async for kind, data in astream_events(
                 app.graph, command,
                 modes=("messages", "updates", "custom"),
-                config=app.thread_config, context=app.context,
+                config=self._config_for(app, req.thread_id), context=app.context,
             ):
                 if kind == "messages":
                     chunk = data[0] if isinstance(data, tuple) else data
@@ -420,11 +461,13 @@ class AgentService:
 
     # ------------------------------------------------------------ 历史
     def _find_cached(self, *, mode: str, provider: str | None, user_id: str, role: str, thread_id: str) -> BuiltApp | None:
-        """优先复用已装配的应用（MCP 那份不能重建，否则会再起一个 Server 进程）。"""
+        """优先复用已装配的应用（MCP 那份不能重建，否则会再起一个 Server 进程）。
+
+        ⚠️ 只读复用：不把 thread_id 写回 app.config（会话隔离，理由见 get()）。
+        """
         for enable_mcp in (True, False):
             app = self._apps.get(self._key(mode, provider, user_id, role, enable_mcp))
             if app is not None:
-                app.config.thread_id = thread_id
                 return app
         return None
 
@@ -443,7 +486,7 @@ class AgentService:
         if app is None:
             return []
         try:
-            state = app.graph.get_state(app.thread_config)
+            state = app.graph.get_state(self._config_for(app, thread_id))
         except Exception:  # noqa: BLE001
             return []
         raw = (state.values or {}).get("messages", []) if state else []

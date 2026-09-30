@@ -21,7 +21,7 @@ from agent_kit.config import AgentSettings
 from agent_kit.middleware import build_middleware_stack
 from agent_kit.prompts import BASE_SYSTEM_PROMPT
 from agent_kit.schemas import ResearchReport, UserContext, report_strategy
-from agent_kit.tools import ALL_TOOLS, SAFE_TOOLS, WRITE_TOOLS
+from agent_kit.tools import ALL_TOOLS, SAFE_TOOLS, WRITE_TOOLS, set_sandbox_root
 
 
 @dataclass
@@ -102,6 +102,9 @@ def build_agent(
             传了就启用，并与摘要压缩互斥（窗口优先）
     """
     settings = settings or AgentSettings()
+
+    # 写工具的落盘根目录必须跟着配置走，否则 workspace / 沙箱设置只是摆设
+    set_sandbox_root(settings.sandbox_dir)
 
     if tools is None:
         tools = list(ALL_TOOLS) if include_write_tools else list(SAFE_TOOLS)

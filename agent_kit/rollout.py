@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agent_kit import db
 from agent_kit.home import resolve_db_path
 
 _TABLE = "rollout"
@@ -64,15 +65,12 @@ def _now_iso() -> str:
 
 def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path else resolve_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_DDL)
-    _ensure_source_column(conn)
-    return conn
+    # 统一走 agent_kit.db：WAL + busy_timeout + 一次性建表（并发初始化曾把测试搞挂）
+    conn = db.connect(path, ddl=_DDL)
+    return _ensure_source_column(conn)
 
 
-def _ensure_source_column(conn: sqlite3.Connection) -> None:
+def _ensure_source_column(conn: sqlite3.Connection) -> sqlite3.Connection:
     """幂等迁移：给没有 source 列的老库补上。
 
     旧版已经落过流水，`CREATE TABLE IF NOT EXISTS` 对它们是空操作，
@@ -82,6 +80,7 @@ def _ensure_source_column(conn: sqlite3.Connection) -> None:
     if "source" not in columns:
         conn.execute(_ADD_SOURCE_COLUMN)
         conn.commit()
+    return conn
 
 
 def _text_of(content: Any) -> str:
@@ -224,7 +223,7 @@ def load(thread_id: str, *, db_path: str | Path | None = None) -> list[dict[str,
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            f"SELECT seq, role, content, tool_name, created_at FROM {_TABLE}"
+            f"SELECT seq, role, content, tool_name, created_at, source FROM {_TABLE}"
             " WHERE thread_id = ? ORDER BY seq",
             (thread_id,),
         ).fetchall()
@@ -235,6 +234,7 @@ def load(thread_id: str, *, db_path: str | Path | None = None) -> list[dict[str,
                 "content": r["content"],
                 "tool_name": r["tool_name"],
                 "created_at": r["created_at"],
+                "source": r["source"],
             }
             for r in rows
         ]

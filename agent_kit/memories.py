@@ -30,6 +30,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from agent_kit import db
 from agent_kit.home import layout
 from agent_kit.logging_conf import get_logger
 
@@ -191,15 +192,14 @@ def _utc_epoch() -> float:
 
 
 def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
+    """统一走 agent_kit.db：busy_timeout + 一次性建表 + 瞬时错误重试。
+
+    旧实现每次连接都跑 executescript(DDL) + WAL，多线程并发初始化同一个新库时
+    在 Windows 上会随机抛 `attempt to write a readonly database`
+    （见 db.py 模块说明），这正是后台记忆管线偶发整轮失败的根因。
+    """
     path = Path(db_path) if db_path else layout().db_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=_BUSY_TIMEOUT_MS / 1000)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_DDL + _LEASE_DDL + _LOCK_DDL)
-    # WAL 让读不阻塞写；本机家目录适用（网络盘上不建议开，这里够用）
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-    return conn
+    return db.connect(path, ddl=_DDL + _LEASE_DDL + _LOCK_DDL, busy_timeout_ms=_BUSY_TIMEOUT_MS)
 
 
 def _default_owner() -> str:

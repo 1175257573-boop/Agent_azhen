@@ -103,6 +103,9 @@ class SqliteStore(BaseStore):
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # 写锁等待 5s；刻意不启用 WAL——同一库文件的短连接调用方（memories/rollout）
+        # 用完即关，WAL 附属文件会随「最后一个连接关闭」被删，存在竞态（见 agent_kit/db.py）
+        self._conn.execute("PRAGMA busy_timeout=5000")
         with self._lock, self._conn:
             self._conn.executescript(_DDL)
 

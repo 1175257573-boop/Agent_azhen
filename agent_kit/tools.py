@@ -29,6 +29,24 @@ from agent_kit.retrieval import RetrieverNotFoundError, available, create, defau
 
 NOTES_DIR = Path(__file__).resolve().parent.parent / "notes"
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# 装配期注入的沙箱根（build_agent 按 settings.sandbox_dir 设置）。
+# 工具函数拿不到 AgentSettings，只能在装配时把落盘根目录写进来；
+# 单进程一个工作区，够用。进程内未注入时回落到仓库根（与旧行为一致）。
+_sandbox_root: Path | None = None
+
+
+def set_sandbox_root(path: str | Path | None) -> None:
+    """设置写工具的落盘根目录（由 build_agent 在装配时调用）。"""
+    global _sandbox_root
+    _sandbox_root = Path(path).resolve() if path else None
+
+
+def sandbox_root() -> Path:
+    """当前写工具允许落盘的根目录。"""
+    return _sandbox_root or _REPO_ROOT / "runs"
+
 
 def _now() -> datetime:
     """带时区的「现在」：UTC 取值后转本地时区，isoformat 会带 +08:00 这类偏移。
@@ -201,10 +219,13 @@ def write_report(filename: str, content: str, runtime: ToolRuntime) -> str:
     if re.search(r"[\\/:*?\"<>|]", filename) or filename in {".", ".."}:
         raise ToolException(f"非法文件名：{filename}")
 
-    root: Path = Path(__file__).resolve().parent.parent
-    target_dir = root / "runs"
+    # 落盘根目录来自装配时注入的沙箱（settings.sandbox_dir），
+    # 旧实现硬编码仓库根，导致 --workspace / 沙箱配置形同虚设。
+    target_dir = sandbox_root()
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = (target_dir / f"{filename}.md").resolve()
+    # 已经带 .md 就不再补，避免 e2e.md → e2e.md.md 这种双后缀
+    name = filename if filename.lower().endswith(".md") else f"{filename}.md"
+    target = (target_dir / name).resolve()
 
     if target_dir.resolve() not in target.parents:
         raise ToolException("检测到路径穿越，已拒绝写入。")
