@@ -1,26 +1,128 @@
-# 记忆层依赖的两个外部服务 —— 推荐走容器（镜像自带 RedisJSON 模块）。
-# 用法与环境变量配置见 README 第 5.1 节。
+# -----------------------------------------------------------------------------
+# Atlas · 本地 Docker Compose 部署编排
 #
-# ⚠️ 安全提醒：下面 postgres 的 atlas/atlas 是【本地开发默认凭据】，
-#    仅限 127.0.0.1 调试使用。任何共享网络 / 公网 / 生产环境都必须改掉，
-#    并且不要直接把 5432、6379 端口暴露出去。详见 SECURITY.md。
+# 拓扑：
 #
-# 用法：docker compose up -d        （首次会拉镜像，约 1-2 分钟）
-#       docker compose ps           （两个都 healthy 再启动 Agent）
-#       docker compose down -v      （连数据一起清掉）
+#     浏览器 / Electron ──▶ :8000 gateway（对外唯一入口，含前端静态资源）
+#                              ├─▶ agent:8001   Agent 执行服务（跑图/审批/排队/凭据）
+#                              └─▶ memory:8002  记忆服务（偏好/状态）
+#                                       │
+#                       两个服务都挂同一个卷 atlas-data:/var/lib/atlas
+#                       —— Agent 写的会话流水，记忆服务必须能看见
 #
-# 起好之后在系统里配两个环境变量（新开终端生效）：
-#   setx REDIS_URL "redis://localhost:6379/0"
-#   setx PG_DSN    "postgresql://atlas:atlas@localhost:5432/atlas"
+# 一个镜像三种角色：镜像只构建一次，靠 APP_MODULE 切换（见 Dockerfile）。
+#
+# 用法：
+#   cp .env.example .env            # 至少填一个模型 Key
+#   docker compose up -d --build    # 首次构建约 3-5 分钟（要装依赖 + 编前端）
+#   docker compose ps               # 三个都 healthy 再打开 http://localhost:8000
+#   docker compose logs -f agent
+#   docker compose down             # 停掉；加 -v 连数据一起清
+#
+# 默认用 SQLite 记忆后端（落共享卷），不用起 Redis / PostgreSQL。
+# 想换成 Redis / PG：
+#   docker compose --profile redis up -d           # 再把 SHORT_TERM_BACKEND=redis 写进 .env
+#   docker compose --profile postgres up -d        # 再把 LONG_TERM_BACKEND=postgres 写进 .env
+#
+# ⚠️ 安全：postgres 的 atlas/atlas 是**本地开发默认凭据**，仅限 127.0.0.1 调试。
+#    任何共享网络 / 公网都必须改掉，并且不要把 5432、6379 暴露出去（见 SECURITY.md）。
+#    模型密钥一律从宿主环境 / .env 注入，compose 里只有 ${...} 引用，没有明文。
+# -----------------------------------------------------------------------------
+
+name: atlas
+
+# Agent 与记忆服务的公共部分：同一个镜像、同一个运行态卷
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    # 没有 .env 也能起（缺失即跳过），有则作为环境变量的兜底来源
+    - path: .env
+      required: false
+  volumes:
+    - atlas-data:/var/lib/atlas
+  environment: &app-env
+    # 运行态根目录 = 共享卷挂载点，三个服务必须一致
+    ATLAS_HOME: /var/lib/atlas
+    # 部署默认落 SQLite（共享卷里），进程重启不丢；想换后端在 .env 里覆盖
+    SHORT_TERM_BACKEND: ${SHORT_TERM_BACKEND:-sqlite}
+    LONG_TERM_BACKEND: ${LONG_TERM_BACKEND:-sqlite}
+    # 后端连不上时降级内存而不是拒绝启动（部署态更看重可用性）
+    MEMORY_STRICT: ${MEMORY_STRICT:-0}
+    # 模型：留空则按已有 Key 自动探测；填 fake 可零 Key 冒烟
+    LLM_PROVIDER: ${LLM_PROVIDER:-}
+    LLM_MODEL: ${LLM_MODEL:-}
+    # 密钥从宿主环境 / .env 注入，compose 里不存明文
+    DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
 
 services:
+  # ---------------------------------------------------------------------------
+  # 对外唯一入口
+  # ---------------------------------------------------------------------------
+  gateway:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_MODULE: server.gateway:app
+      PORT: "8000"
+      # 只查自己：/api/health 会级联探测下游，不能当容器健康检查用
+      HEALTH_PATH: /api/info
+      AGENT_SERVICE_URL: http://agent:8001
+      MEMORY_SERVICE_URL: http://memory:8002
+    ports:
+      # 只有网关对宿主发布端口，Agent / 记忆服务只在内网可达
+      - "${GATEWAY_PORT:-8000}:8000"
+    depends_on:
+      agent:
+        condition: service_healthy
+      memory:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Agent 执行服务：跑图。密钥要落在这个进程里，模型鉴权才过得去
+  # ---------------------------------------------------------------------------
+  agent:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_MODULE: server.agent_app:app
+      PORT: "8001"
+      HEALTH_PATH: /api/health?probe_backends=false
+    expose:
+      - "8001"
+
+  # ---------------------------------------------------------------------------
+  # 记忆服务：长期偏好 / 后端状态
+  # ---------------------------------------------------------------------------
+  memory:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_MODULE: server.memory_app:app
+      PORT: "8002"
+      HEALTH_PATH: /api/health?probe_backends=false
+    expose:
+      - "8002"
+
+  # ---------------------------------------------------------------------------
+  # 可选后端：默认不启动（要用就 --profile redis / --profile postgres）
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: atlas-redis
-    # 追加 --save 60 1 让 Redis 定期落盘，纯缓存场景可以去掉这一行
+    profiles: ["redis"]
+    # --save 60 1 让它定期落盘，纯缓存场景可以去掉
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
     ports:
-      - "6379:6379"
+      # 只绑 127.0.0.1：本机调试用，不对外
+      - "127.0.0.1:6379:6379"
     volumes:
       - atlas-redis-data:/data
     healthcheck:
@@ -32,20 +134,23 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: atlas-postgres
+    profiles: ["postgres"]
     environment:
-      POSTGRES_USER: atlas
-      POSTGRES_PASSWORD: atlas
-      POSTGRES_DB: atlas
+      POSTGRES_USER: ${POSTGRES_USER:-atlas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atlas}
+      POSTGRES_DB: ${POSTGRES_DB:-atlas}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - atlas-pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-atlas} -d ${POSTGRES_DB:-atlas}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
 volumes:
+  # 会话流水 + 记忆库：Agent 与记忆服务共享，删卷等于清空全部会话与记忆
+  atlas-data:
   atlas-redis-data:
   atlas-pg-data:

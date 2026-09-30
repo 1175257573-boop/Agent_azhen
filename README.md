@@ -153,6 +153,11 @@ langchain-v1.4-demo/
 ├── notes/                    ≈ src/main/resources（含 MCP 规范 / 接入笔记）
 ├── skills/                   ≈ 可复用的 Skill 包（mcp-integration）
 ├── runs/                     ≈ 运行时输出
+├── Dockerfile                ≈ 两阶段构建：node 编前端 → python 只装运行时
+├── docker-compose.yml        ≈ 部署编排（gateway / agent / memory + 可选 Redis、PG）
+├── deploy/                   ≈ 部署辅助
+│   ├── healthcheck.py          ≈ 容器内健康检查（只查自己，不级联下游）
+│   └── up_local.py             ≈ 无 Docker 时的三进程启动器（同拓扑）
 ├── web/                      ≈ 前端工程（React + TypeScript + Vite）
 │   ├── src/pages/              ≈ 六个页面：聊天 / 审批 / 会话 / 队列 / 配置 / 记忆
 │   ├── src/api.ts              ≈ 后端 REST + SSE 客户端
@@ -198,6 +203,7 @@ langchain-v1.4-demo/
 | `@Configuration` | `agent_kit/config.py` |
 | Bean 工厂 | `agent_kit/app.py` |
 | pom.xml | `pyproject.toml` / `requirements.txt` |
+| 部署编排 | `docker-compose.yml` + `Dockerfile`（一个镜像三种角色） |
 
 <a id="sec3"></a>
 ## 3. 配置：密钥只从系统环境变量读取
@@ -302,6 +308,57 @@ python -m server.gateway    --port 8000   # 网关：对外唯一入口，转发
 - 下游地址用环境变量覆盖：`AGENT_SERVICE_URL` / `MEMORY_SERVICE_URL`。
 - 下游不可达时网关一律回 **502 JSON**（绝不「200 + 空响应体」），`/api/health` 会聚合两个下游的存活状态。
 - 会话存储（checkpointer / store）是共享后端，Agent 与记忆服务各自直连，互不依赖。
+
+### Docker Compose 部署
+
+一个镜像三种角色（`APP_MODULE` 切换），前端在构建阶段用 node 编好、只把产物拷进运行时镜像：
+
+```
+浏览器 / Electron ──▶ :8000 gateway（对外唯一入口，含前端静态资源）
+                        ├─▶ agent:8001   Agent 执行服务（跑图 / 审批 / 排队 / 凭据）
+                        └─▶ memory:8002  记忆服务（偏好 / 状态）
+                                 │
+                  两个服务同挂 atlas-data:/var/lib/atlas
+                  —— Agent 写的会话流水，记忆服务必须能看见
+```
+
+```bash
+cp .env.example .env            # 至少填一个模型 Key（.env 不会入库）
+docker compose up -d --build    # 首次构建约 3-5 分钟
+docker compose ps               # 三个都 healthy 再打开 http://localhost:8000
+docker compose logs -f agent
+docker compose down             # 加 -v 连数据一起清
+```
+
+| 项 | 说明 |
+|---|---|
+| 对外端口 | 只有网关发布 `8000`（可用 `GATEWAY_PORT` 改）；agent / memory 只在容器网络内可达 |
+| 数据卷 | `atlas-data` 挂到 `/var/lib/atlas`，**删卷 = 清空全部会话与记忆** |
+| 记忆后端 | 默认 SQLite（落共享卷，重启不丢）；换 Redis / PG 见下 |
+| 密钥 | 一律从宿主环境 / `.env` 注入，compose 里只有 `${...}` 引用，**没有明文** |
+| 启动顺序 | 网关等两个下游 `service_healthy` 才起，避免头几秒全是 502 |
+
+想换成 Redis / PostgreSQL（默认不启动，省两个镜像）：
+
+```bash
+docker compose --profile redis up -d        # 再把 SHORT_TERM_BACKEND=redis 写进 .env
+docker compose --profile postgres up -d     # 再把 LONG_TERM_BACKEND=postgres 写进 .env
+```
+
+> **健康检查只查自己**：网关的容器探针走 `/api/info`，绝不能用 `/api/health` ——
+> 那个接口会级联探测下游，下游一挂编排器就把一个本来健康的网关也重启了，
+> 局部故障会被放大成整体抖动。想看下游活没活，去查 `/api/health` 聚合结果。
+
+**没有 Docker 也想跑同款拓扑**：`deploy/up_local.py` 拉起一样的三进程（同一套环境变量、
+同一个共享运行态目录），改一行 Python 立刻见效，不用等镜像构建：
+
+```powershell
+python deploy/up_local.py                     # 默认 :8000/:8001/:8002，运行态 ~/.atlas
+python deploy/up_local.py --provider fake     # 零 API Key 冒烟
+python deploy/up_local.py --log-dir .logs     # 子进程日志落盘
+```
+
+Ctrl-C 一次退出，三个进程一起收干净，不留孤儿占端口。
 
 ### 桌面客户端（Electron，可选）
 
@@ -577,15 +634,14 @@ python main.py memories --background --wait 30  # 最多等 30 秒看结果
 
 ### 起服务
 
-推荐直接用容器，`docker-compose.yml` 里已经配好了两个服务：
+推荐直接用容器（完整用法见第 4 节的「Docker Compose 部署」）：
 
 ```bash
-docker compose up -d      # 首次会拉镜像，约 1-2 分钟
-docker compose ps         # 两个都 healthy 再启动 Agent
-docker compose down -v    # 连数据一起清掉
+docker compose --profile redis --profile postgres up -d   # 起 Redis + PostgreSQL
 ```
 
-起好之后配两个环境变量即可，也可以写进 `.env`（见第 3 节）：
+只想起这两个依赖、应用仍在宿主机跑时，用上面这条（compose 默认只起 gateway / agent / memory，
+用 SQLite 后端）。起好之后配两个环境变量即可，也可以写进 `.env`（见第 3 节）：
 
 ```bash
 export REDIS_URL="redis://localhost:6379/0"

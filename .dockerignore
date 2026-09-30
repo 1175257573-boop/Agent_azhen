@@ -1,0 +1,43 @@
+# 构建上下文瘦身：不进镜像的东西全部排除
+# （镜像里只保留 agent_kit / server / static / web 产物 / main.py / ui.py）
+
+.git
+.github
+.githooks
+.pytest_cache
+.gitignore.gitattributes
+
+# Python
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+*.egg-info
+
+# 前端：源码要进（构建用），依赖与产物不进
+web/node_modules
+web/dist
+web/vite.config.ts.timestamp-*.mjs
+
+# 桌面端（Electron）：与容器部署无关
+desktop
+desktop/node_modules
+desktop/dist
+desktop/out
+
+# 运行态 / 文档 / 示例
+runs
+notes
+examples
+skills
+*.md
+*.patch
+
+# 本地配置与密钥：绝不进镜像
+.env
+.env.*
+!.env.example
+*.key
+*.pem
