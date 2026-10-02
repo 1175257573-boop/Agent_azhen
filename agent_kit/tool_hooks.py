@@ -57,6 +57,43 @@ def dual(sync_fn: Any, async_fn: Any, name: str | None = None) -> DualToolMiddle
     return DualToolMiddleware(sync_fn, async_fn, name=name)
 
 
+class MessagesTransformMiddleware(_NamedMixin, AgentMiddleware):
+    """把一个「收发 messages → 返回新 messages」的纯函数包成模型侧中间件。
+
+    和 DualModelMiddleware 的区别：**消息加工是纯 CPU 操作**（裁剪窗口、修补
+    tool_calls 配对），没必要让调用方写两遍逻辑，所以这里只收一个 fn，
+    同步/异步的唯一差别是 handler 要不要 await。
+
+    约定：fn 返回 `None` 表示「无需修改」，原样放行（避免无谓的 state 写入）。
+    """
+
+    def __init__(self, fn: Any, name: str | None = None) -> None:
+        super().__init__()
+        self._fn = fn
+        self._display_name = name or getattr(fn, "__name__", "messages_transform")
+
+    def _apply(self, request: Any) -> Any:
+        msgs = getattr(request, "messages", None) or []
+        new_msgs = self._fn(msgs)
+        if new_msgs is None:
+            return request
+        # 用 override 而不是 `request.messages = ...`：后者已废弃，且未来可能失效
+        return request.override(messages=new_msgs)
+
+    # 同步链路：CLI / 同步 stream
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        return handler(self._apply(request))
+
+    # 异步链路：astream / ainvoke（MCP 场景必须走这条）
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        return await handler(self._apply(request))
+
+
+def messages_transform(fn: Any, *, name: str | None = None) -> MessagesTransformMiddleware:
+    """把一个消息加工函数打包成中间件实例（同步 + 异步都可用）。"""
+    return MessagesTransformMiddleware(fn, name=name)
+
+
 class DualModelMiddleware(_NamedMixin, AgentMiddleware):
     """同理，`wrap_model_call` / `awrap_model_call` 也要成对提供。"""
 

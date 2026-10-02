@@ -30,7 +30,7 @@ from langchain_core.messages import SystemMessage, ToolMessage
 
 from agent_kit.config import AgentSettings
 from agent_kit.logging_conf import get_logger
-from agent_kit.tool_hooks import dual
+from agent_kit.tool_hooks import dual, messages_transform
 from agent_kit.tools import DANGEROUS_TOOL_NAMES, error_handler
 
 log = get_logger("agent.tool")
@@ -55,6 +55,39 @@ def audit_guard(state: Any, runtime: Any) -> dict | None:
     if len(msgs) > 40 and role != "admin":
         return {"messages": [SystemMessage(content="上下文已超长，请立即给出结论，不要再调用工具。")]}
     return None
+
+
+def _repair_pairs(msgs: list[Any]) -> list[Any] | None:
+    """模型调用前最后一道防线：保证 tool_calls 与 ToolMessage 成对。
+
+    和消息窗口不是一回事——窗口只在消息数超限时才裁剪，而这里**每次都跑**，
+    因为悬空的 tool_calls 往往不是裁剪造成的，而是上一轮工具执行被中断
+    （鉴权失败、网络断开、进程被关）后留在 checkpoint 里的半截状态。
+    只要它还在历史里，下一次请求必然 400，用户除了清空会话没法自救。
+
+    **为什么这样挂载**（实测踩的两个坑，都记在这里避免重犯）：
+      1. 不能用 before_model：它返回的 {"messages": [...]} 要过 state 的
+         add_messages reducer，语义是「按 id 合并后**追加**」——既删不掉旧消息，
+         也没法把补齐的 tool 消息插到正确位置，只会追加到末尾且每次追加一份；
+      2. 不能直接 @wrap_model_call：装饰器只为被装饰的那一种函数生成实现，
+         走到 astream（MCP 场景）会抛
+         `NotImplementedError: Asynchronous implementation of awrap_model_call
+         is not available`。所以用 messages_transform 包一层，同步异步都有实现。
+
+    返回 None 表示无需修补，原样放行。
+    """
+    from agent_kit.memory import sanitize_tool_call_pairs
+
+    fixed = sanitize_tool_call_pairs(msgs)
+    if fixed is not None:
+        log.warning(
+            "消息链不完整已修补：%d 条 → %d 条（补齐缺失的 tool 响应 / 丢弃孤儿工具消息）",
+            len(msgs), len(fixed),
+        )
+    return fixed
+
+
+tool_call_pair_guard = messages_transform(_repair_pairs, name="tool_call_pair_guard")
 
 
 def _log_tool_ok(tool_name: str, elapsed_ms: float, result: Any) -> None:
@@ -305,6 +338,11 @@ def build_middleware_stack(
                 trim_tokens_to_summarize=4000,
             )
         )
+
+    # ---- 4.5 消息链完整性：无条件挂载（不依赖窗口是否开启） ------------------
+    #          必须排在消息窗口**之后**：先裁剪，再修补，才能连裁剪切开的
+    #          tool_calls / ToolMessage 对一起补上。
+    stack.append(tool_call_pair_guard)
 
     # ---- 5. 数据合规：邮箱脱敏 --------------------------------------------
     stack.append(

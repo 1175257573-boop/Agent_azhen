@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import os
 import uuid
@@ -192,6 +193,79 @@ def build_checkpointer(mode: str | None = None) -> Any:
 
     RESOLVED["short"] = "memory"
     return InMemorySaver()
+
+
+async def build_async_checkpointer(mode: str | None = None) -> Any:
+    """异步链路专用的短期记忆。**不要拿 build_checkpointer() 顶替**。
+
+    为什么需要单独一个（2026-09 实测踩出来的坑）：
+      同步 SqliteSaver 没实现异步方法，一旦图走 `astream` / `ainvoke`，
+      langgraph 会去调 saver 的 async 接口，直接抛
+      `NotImplementedError: The SqliteSaver does not support async methods`。
+      ——MCP 场景（`enable_mcp=True` / `mode=mcp`）必然走异步，
+      所以那条链路必须用 AsyncSqliteSaver（底层依赖 aiosqlite）。
+
+    `redis` 同理走 its own async saver；都不可用则退回 InMemorySaver（支持异步）。
+    """
+    from agent_kit.home import resolve_db_path
+
+    mode = (mode or short_backend()).lower()
+
+    if mode == "redis":
+        url = _dsn("REDIS_URL")
+        if not url:
+            log.warning("SHORT_TERM_BACKEND=redis 但未设置 REDIS_URL，异步链路降级")
+        else:
+            try:
+                from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+                saver = AsyncRedisSaver(
+                    url,
+                    connection_args={"protocol": _env_int("REDIS_PROTOCOL", 2)},
+                )
+                RESOLVED["short"] = "redis[async]"
+                log.info("短期记忆（异步）→ Redis")
+                return saver
+            except Exception as exc:  # noqa: BLE001
+                _degrade("短期记忆（异步）", "redis", exc)
+
+    if mode == "sqlite":
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+            db_path = resolve_db_path()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            # 与同步版一样：from_conn_string 给的是上下文管理器，得先 __aenter__
+            cm = AsyncSqliteSaver.from_conn_string(str(db_path))
+            saver = await cm.__aenter__()
+            atexit.register(_close_async_quietly, cm)
+            RESOLVED["short"] = f"sqlite[async:{db_path.name}]"
+            log.info("短期记忆（异步）→ SQLite %s", db_path)
+            return saver
+        except Exception as exc:  # noqa: BLE001
+            _degrade("短期记忆（异步）", "sqlite", exc)
+
+    RESOLVED["short"] = "memory"
+    return InMemorySaver()
+
+
+def _close_async_quietly(cm: Any) -> None:
+    """关异步上下文管理器。进程退出时事件循环通常已经没了，
+    所以这里新开一个 loop 跑完就关，而不是依赖当时那个 loop。"""
+    async def _close() -> None:
+        try:
+            await cm.__aexit__(None, None, None)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("异步记忆连接关闭时出错（可忽略）：%s", exc)
+
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_close())
+        finally:
+            loop.close()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("异步记忆连接未能优雅关闭（可忽略）：%s", exc)
 
 
 def _redis_client(url: str, **extra: Any) -> Any:
@@ -361,6 +435,88 @@ def _hide_pwd(dsn: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 消息链修补：tool_calls 与 ToolMessage 必须成对
+# ---------------------------------------------------------------------------
+def sanitize_tool_call_pairs(msgs: list[Any]) -> list[Any] | None:
+    """修补 tool_calls / ToolMessage 不配对的消息链，返回 None 表示无需修补。
+
+    为什么要这道工序（2026-09 实测踩出来的线上级 bug）：
+      OpenAI 兼容接口（DeepSeek / 通义 / OpenAI 都一样）要求带 tool_calls 的
+      assistant 消息后面**必须**紧跟对应每条 tool_call_id 的 tool 消息，否则直接
+      400：`An assistant message with 'tool_calls' must be followed by tool messages
+      responding to each 'tool_call_id'`。
+
+    两种坏结构：
+      1. **悬空 tool_calls** —— AIMessage 带 tool_calls，后面却没有 ToolMessage。
+         成因：工具执行阶段被中断（网络/鉴权失败、进程被关），checkpoint 只落了
+         AI 半截，用户下一条消息又被追加进来。这次线上就是这么产生的。
+      2. **孤儿 ToolMessage** —— 找不到发起它的 AIMessage。
+         成因：消息窗口裁剪把前面的 AIMessage 丢掉了。
+
+    处理办法：
+      · 悬空的补一条「未返回结果」的 ToolMessage，保住 tool_call_id 的配对；
+      · 孤儿 ToolMessage 直接丢掉（留着同样会 400）。
+
+    幂等：修补过的结果再跑一遍返回 None，不会重复插入。
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    MISSING_HINT = "[工具调用未返回结果：上一轮在工具执行阶段中断，结果没有写入记忆]"
+
+    pending: list[tuple[str, str]] = []   # [(tool_call_id, tool_name)] 尚未被响应
+    out: list[Any] = []
+    changed = False
+
+    def flush() -> None:
+        """给还没响应的 tool_calls 补 ToolMessage。"""
+        nonlocal changed
+        for cid, name in pending:
+            out.append(
+                ToolMessage(
+                    content=MISSING_HINT,
+                    tool_call_id=cid,
+                    name=name or None,
+                    status="error",
+                )
+            )
+            changed = True
+        pending.clear()
+
+    for m in msgs:
+        # ---- ToolMessage：只对得上号才留 ----
+        if isinstance(m, ToolMessage):
+            cid = getattr(m, "tool_call_id", None)
+            hit = next((p for p in pending if p[0] == cid), None)
+            if hit is None:
+                changed = True          # 孤儿，丢弃
+                continue
+            pending.remove(hit)
+            out.append(m)
+            continue
+
+        # ---- 非 ToolMessage：先把上一轮没配对的补齐 ----
+        if pending:
+            flush()
+
+        if isinstance(m, AIMessage):
+            calls = getattr(m, "tool_calls", None) or []
+            ids: list[tuple[str, str]] = []
+            for c in calls:
+                cid = c.get("id") if isinstance(c, dict) else getattr(c, "id", None)
+                name = c.get("name") if isinstance(c, dict) else getattr(c, "name", None)
+                if cid:
+                    ids.append((str(cid), str(name or "")))
+            pending = ids
+
+        out.append(m)
+
+    if pending:
+        flush()
+
+    return out if changed else None
+
+
+# ---------------------------------------------------------------------------
 # 消息窗口：短期记忆的「上下文侧」策略
 # ---------------------------------------------------------------------------
 def make_message_window(window: int | None = None) -> Any:
@@ -370,15 +526,21 @@ def make_message_window(window: int | None = None) -> Any:
       · AI 消息带 tool_calls 时，紧跟的 ToolMessage 必须一起留，否则 API 报错；
       · 系统消息要保留。
     所以这里用 langchain 的 trim_messages，而不是 list[-N:]。
+
+    为什么这么挂载（2026-09 实测修正了两个坑）：
+      1. 不能用 before_model：它返回的 {"messages": [...]} 要过 state 的
+         add_messages reducer，语义是「按 id 合并后追加」——**没有删除能力**，
+         被裁掉的消息照样留在 state 里，窗口形同虚设（日志在报「22 → 14」，
+         可 state 里一直是 28 条）；
+      2. 不能直接 @wrap_model_call：装饰器只生成同步实现，走 astream（MCP 场景）
+         会抛 `awrap_model_call is not available`。所以统一用 messages_transform
+         包一层，同步与异步链路都用得上。
     """
-    from langchain.agents.middleware import before_model
     from langchain_core.messages import trim_messages
 
     size = window or window_size()
 
-    @before_model
-    def _window(state: Any, runtime: Any) -> dict | None:
-        msgs = state.get("messages", []) if isinstance(state, dict) else []
+    def _trim(msgs: list[Any]) -> list[Any] | None:
         if len(msgs) <= size:
             return None
         trimmed = trim_messages(
@@ -393,10 +555,21 @@ def make_message_window(window: int | None = None) -> Any:
         )
         dropped = len(msgs) - len(trimmed)
         if dropped > 0:
-            log.info("消息窗口：%d 条 → %d 条（丢弃最早的 %d 条，仍在 Redis 中可回溯）", len(msgs), len(trimmed), dropped)
-        return {"messages": trimmed}
+            log.info(
+                "消息窗口：%d 条 → %d 条（本次请求丢弃最早的 %d 条，仍在记忆库中可回溯）",
+                len(msgs), len(trimmed), dropped,
+            )
+        # trim_messages 只在「整轮」层面保证边界，切在 tool_calls 与 ToolMessage
+        # 之间时它并不总能把对一起保留，所以裁完再统一修补一次（幂等）。
+        fixed = sanitize_tool_call_pairs(trimmed)
+        if fixed is not None:
+            log.info("消息链修补：裁剪后 %d 条 → %d 条（补齐缺失的 tool 响应 / 丢弃孤儿工具消息）", len(trimmed), len(fixed))
+        return fixed or trimmed
 
-    return _window
+    # 同样要用 messages_transform：包出来的中间件同步 + 异步都可用
+    from agent_kit.middleware import messages_transform
+
+    return messages_transform(_trim, name="message_window")
 
 
 # ---------------------------------------------------------------------------

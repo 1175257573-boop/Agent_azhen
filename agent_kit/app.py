@@ -285,7 +285,9 @@ async def build_app_async(cfg: AppConfig) -> BuiltApp:
 
     model: BaseChatModel = build_chat_model(settings)
 
-    checkpointer = mem.build_checkpointer()
+    # 异步链路必须用异步 saver：SqliteSaver 没有 async 方法，
+    # 走 astream 时会抛 NotImplementedError（详见 memory.build_async_checkpointer）
+    checkpointer = await mem.build_async_checkpointer()
     store = mem.build_store()
     mem.seed_long_term_memory(store, user_id=cfg.user_id)
 
