@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import ApprovalCard from '../components/ApprovalCard'
 import { api } from '../api'
 import { useStore } from '../store'
+import type { CredentialState } from '../types'
 
 export default function Chat() {
   const {
@@ -19,8 +20,13 @@ export default function Chat() {
     queue,
     refreshQueue,
     toast,
+    provider,
+    setConfig,
   } = useStore()
   const [draft, setDraft] = useState('')
+  // 对话界面直接指定用哪条 key：选项只列已配置的，并把掩码一起显示出来，
+  // 这样「当前到底用的是哪条」一眼可见，不用回设置页去猜。
+  const [creds, setCreds] = useState<CredentialState | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const scroller = useRef<HTMLDivElement | null>(null)
 
@@ -28,6 +34,11 @@ export default function Chat() {
     const el = scroller.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages])
+
+  // 每次进入对话页重新拉一次凭据：在设置页新增/删除 key 后回到这里能立刻看到
+  useEffect(() => {
+    void api.credentials().then(setCreds).catch(() => setCreds(null))
+  }, [])
 
   const mine = pending.filter((p) => p.thread_id === threadId)
 
@@ -65,6 +76,37 @@ export default function Chat() {
     <div className="chat">
       <div className="chat-head">
         <code className="tid">{threadId}</code>
+        <label className="key-pick" title="指定这条对话用哪条 API key">
+          <span>密钥</span>
+          <select
+            className="select"
+            value={provider ?? ''}
+            disabled={streaming}
+            onChange={(e) => {
+              const next = e.target.value || null
+              setConfig({ provider: next })
+              const hit = creds?.items.find((c) => c.provider === next)
+              if (!next) {
+                toast('ok', '已改回自动探测')
+              } else {
+                toast('ok', `本次对话改用 ${hit?.label ?? next}${hit?.masked ? ` · ${hit.masked}` : ''}`)
+              }
+            }}
+          >
+            <option value="">自动{creds ? `（当前 ${creds.active_provider}）` : ''}</option>
+            {(creds?.items ?? [])
+              .filter((c) => c.configured)
+              .map((c) => (
+                <option key={c.provider} value={c.provider}>
+                  {c.label} · {c.masked}
+                </option>
+              ))}
+            {/* 选中的 provider 恰好被删掉了 key 时，别让下拉显示成空白 */}
+            {provider && !(creds?.items ?? []).some((c) => c.configured && c.provider === provider) ? (
+              <option value={provider}>{provider}（未配置）</option>
+            ) : null}
+          </select>
+        </label>
         <span className="grow" />
         <button className="btn tiny ghost" onClick={() => void reloadHistory()} disabled={streaming}>
           刷新历史

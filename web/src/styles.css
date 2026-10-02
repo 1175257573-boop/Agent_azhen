@@ -630,6 +630,20 @@ textarea:focus {
   color: var(--muted);
 }
 
+/* 密钥选择：带文字标签，避免裸下拉被当成装饰 */
+.chat-head .key-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-head .key-pick .select {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
 .stream {
   flex: 1;
   min-height: 0;
