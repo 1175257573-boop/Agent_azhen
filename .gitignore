@@ -69,6 +69,8 @@ web/dist/
 web/vite.config.ts.timestamp-*.mjs
 # 本机记住的解释器路径，因机器而异，不入库
 desktop/.atlas-desktop.json
+# 换图标前的原文件备份，只在本机留着
+desktop/assets/_backup/
 
 # ---------- 操作系统 ----------
 .DS_Store
