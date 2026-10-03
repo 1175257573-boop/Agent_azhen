@@ -224,6 +224,7 @@ it('配置页：保存密钥时明文只在请求体里，且带上 remember', a
 
   await waitFor(() => expect(findCall(calls, 'POST', '/api/credentials')).toBeTruthy())
   const saved = findCall(calls, 'POST', '/api/credentials')
+  // 假密钥，形态与真实一致才能验证「明文只在请求体」这条断言；从不用于任何真实请求
   expect(saved?.body).toMatchObject({ provider: 'openai', api_key: 'sk-unit-test-000000', remember: false })
 
   // 明文不能落到任何浏览器存储里

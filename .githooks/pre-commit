@@ -33,8 +33,14 @@ HARD="$HARD"'|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 # 下列是 tests/ 里长期存在的**假**密钥样例，专用于验证打码与脱敏逻辑。
 # 采用「整串相等」而非「片段包含」，避免真实密钥碰巧含有某片段而被放过。
 #
+# 这些串现已集中存放在 tests/fake_secrets.py（全仓库唯一存放点），
+# 对外公开时看到它们属正常——那是测试夹具，不是泄露。
+#
+# ⚠️ 别删：打码 / 脱敏功能必须用「真实形态」的输入才测得出来，
+#    换成 test123 这种是测不出格式化正则的。
+#
 # 以后在测试里新写假密钥，有两种做法（不会误伤真实密钥）：
-#   a) 把完整串登记到这里；
+#   a) 加到 tests/fake_secrets.py，并在这里登记完整串；
 #   b) 或在那一行加行级豁免注释：  # secret-scan: allow
 #      （豁免只作用于所在行，且会写进代码——便于评审时一眼看到谁被放行了）
 ALLOW_SAMPLES='ghp_abcdefghijklmnopqrstuv
@@ -43,7 +49,8 @@ sk-ZZZZZZZZZZZZZZZZZZZZ
 sk-abcdef0123456789abcdef0123456789
 sk-abcdefghijklmnopqrstuvwxyz123456
 sk-original-from-system-env
-sk-unregistered-key-123456'
+sk-unregistered-key-123456
+sk-unit-test-000000'
 
 # 行级豁免标记：该行不参与扫描
 EXEMPT_RE='secret-scan:[[:space:]]*allow'

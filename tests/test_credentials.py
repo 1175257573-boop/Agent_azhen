@@ -17,17 +17,23 @@ import logging
 import os
 
 import pytest
+from fake_secrets import (
+    FAKE_BEARER,
+    FAKE_ENV_KEY,
+    FAKE_KEY,
+    FAKE_UNREGISTERED_KEY,
+)
 
 from agent_kit import credentials as creds
 from agent_kit.redact import (
     forget_secret,
-    known_secret_count,
     mask,
     redact,
     register_secret,
 )
 
-KEY = "sk-abcdef0123456789abcdef0123456789"
+# 假密钥统一在 tests/fake_secrets.py 集中维护（对外公开时属正常夹具）
+KEY = FAKE_KEY
 
 
 @pytest.fixture
@@ -56,8 +62,8 @@ def test_redact_replaces_registered_secret():
 
 def test_redact_catches_unregistered_sk_and_bearer():
     """形态兜底：即使某个密钥没登记过，也不能原样漏出去。"""
-    assert "sk-unregistered-key-123456" not in redact("token=sk-unregistered-key-123456")
-    assert "abcdefghijklmnop1234" not in redact("Authorization: Bearer abcdefghijklmnop1234")
+    assert FAKE_UNREGISTERED_KEY not in redact(f"token={FAKE_UNREGISTERED_KEY}")
+    assert "abcdefghijklmnop1234" not in redact(f"Authorization: {FAKE_BEARER}")
 
 
 def test_redacting_formatter_keeps_numeric_args_intact():
@@ -126,7 +132,7 @@ def test_info_never_contains_plaintext(store, monkeypatch):
 
 def test_clear_restores_pre_existing_env(store, monkeypatch):
     """关键回归点：界面清了密钥，不能把用户原本配好的环境变量一起抹掉。"""
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-original-from-system-env")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", FAKE_ENV_KEY)
     assert store.info("dashscope").origin == "env"
 
     store.set("dashscope", KEY)
@@ -134,7 +140,7 @@ def test_clear_restores_pre_existing_env(store, monkeypatch):
     assert store.info("dashscope").shadowed is True
 
     store.clear("dashscope")
-    assert os.environ["DASHSCOPE_API_KEY"] == "sk-original-from-system-env"
+    assert os.environ["DASHSCOPE_API_KEY"] == FAKE_ENV_KEY
     assert store.info("dashscope").origin == "env"
 
 

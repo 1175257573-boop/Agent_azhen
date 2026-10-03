@@ -11,6 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fake_secrets import (
+    FAKE_GITHUB_TOKEN,
+    FAKE_KEY_IN_DIALOG,
+    FAKE_KEY_IN_DIALOG_ALT,
+)
 
 from agent_kit import memory_jobs, rollout
 from agent_kit.memories import MemoryExtract
@@ -137,8 +142,8 @@ def test_unparsable_timestamp_is_dropped(tmp_path):
 @pytest.mark.parametrize(
     ("raw", "needle", "must_be_gone"),
     [
-        ("我的 key 是 sk-abcdefghijklmnopqrstuvwxyz123456", "sk-abcdefghijklmnopqrstuvwxyz123456", True),
-        ("github token ghp_abcdefghijklmnopqrstuv", "ghp_abcdefghijklmnopqrstuv", True),
+        (f"我的 key 是 {FAKE_KEY_IN_DIALOG_ALT}", FAKE_KEY_IN_DIALOG_ALT, True),
+        (f"github token {FAKE_GITHUB_TOKEN}", FAKE_GITHUB_TOKEN, True),
         ("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9abcdefg", "eyJhbGciOiJIUzI1NiJ9abcdefg", True),
         ("api_key=AXIS2024secretvalue", "AXIS2024secretvalue", True),
     ],
@@ -167,7 +172,7 @@ def test_phase1_redacts_before_saving(tmp_path):
             class _Extract:
                 def invoke(self_inner, prompt: str) -> MemoryExtract:
                     return MemoryExtract(
-                        raw_memory="用户说他的 key 是 sk-ZZZZZZZZZZZZZZZZZZZZ，要记住",
+                        raw_memory=f"用户说他的 key 是 {FAKE_KEY_IN_DIALOG}，要记住",
                         rollout_summary="粘贴了密钥",
                         rollout_slug=None,
                     )
@@ -183,7 +188,7 @@ def test_phase1_redacts_before_saving(tmp_path):
 
     memories.run_phase1(model=_Leaky(), threads=["t1"], db_path=db, rollout_db=rollout_db)
     stored = memories.all_records(db_path=db)[0]
-    assert "sk-ZZZZZZZZZZZZZZZZZZZZ" not in stored.raw_memory
+    assert FAKE_KEY_IN_DIALOG not in stored.raw_memory
     assert "[REDACTED" in stored.raw_memory
 
 

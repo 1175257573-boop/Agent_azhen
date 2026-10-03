@@ -147,7 +147,9 @@ class _CapturingModel(BaseChatModel):
         return "capturing"
 
 
-# 两处 tool_calls 没有响应的坏历史，正是线上 400 的形态
+# 两处 tool_calls 没有响应的坏历史，正是线上 400 的形态。
+# 纯手工构造的最小样本（不来自任何真实会话），内容刻意取得含糊，
+# 避免被误读成真实用户的聊天记录。
 _DIRTY = [
     SystemMessage(content="你是助手"),
     HumanMessage(content="生成一个脚本"),
