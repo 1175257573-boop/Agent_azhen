@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -271,67 +272,90 @@ def _close_async_quietly(cm: Any) -> None:
 def _redis_client(url: str, **extra: Any) -> Any:
     import redis
 
-    return redis.Redis.from_url(
-        url,
-        socket_connect_timeout=3,
-        socket_timeout=3,
-        protocol=_env_int("REDIS_PROTOCOL", 2),   # 兼容 Redis 5.x
-        **extra,
-    )
+    # 用 dict 合并而不是直接写死参数：调用方（如健康检查探针）要能覆盖超时，
+    # 写成 `from_url(url, socket_connect_timeout=3, **extra)` 会因为
+    # extra 里再带同名参数直接抛 "got multiple values for keyword argument"。
+    opts: dict[str, Any] = {
+        "socket_connect_timeout": 3,
+        "socket_timeout": 3,
+        "protocol": _env_int("REDIS_PROTOCOL", 2),   # 兼容 Redis 5.x
+    }
+    opts.update(extra)
+    return redis.Redis.from_url(url, **opts)
 
 
-def _ping_redis(url: str) -> None:
+def _ping_redis(url: str, timeout: float | None = None) -> None:
     """拨一次 PING，让「连不上」在启动时就暴露，而不是等到写 checkpoint 时才炸。"""
-    client = _redis_client(url)
+    client = _redis_client(url, **({"socket_connect_timeout": timeout} if timeout else {}))
     try:
         client.ping()
     finally:
         client.close()
 
 
-def probe() -> dict[str, dict[str, str]]:
-    """**真实**探测两个记忆后端的连通性（不是只看配置里写了什么）。
+def probe(*, timeout: float | None = None) -> dict[str, dict[str, str]]:
+    """探测记忆后端的连通性，**并区分「实际生效」与「只是装了扩展」**。
 
     返回形如：
-        {"short_term": {"backend": "redis", "alive": True, ...}, "long_term": {...}}
+        {"short_term": {"backend": "sqlite", "active": True, "alive": "True", ...}, ...}
 
-    用途：`/api/health` 探活、`python main.py check --ping` 自查。
-    注意：这里是纯读探测（PING / 建连后立刻关闭），不会写任何数据。
+    语义（Redis / PostgreSQL 是**可选的系统拓展**，不是核心必需组件）：
+      · `active=True`  —— 这个后端**正在被使用**，它挂了就是真故障；
+      · `active=False` —— 只是环境变量里留了地址、或装了扩展但没启用，
+                          属于「拓展未启用」，**既不探测也不影响健康判定**。
+
+    为什么要这么分：早先的实现只看「环境变量里有没有 REDIS_URL / PG_DSN」就去连，
+    于是本机没起 Redis/PG 的人（实际用的是 SQLite）也会被探测拖住 ——
+    一次 `/api/health` 要 7 秒以上。更糟的是它还会让整体 `ok` 变成 false，
+    相当于「没装插件」被算成了「系统坏了」。
+
+    `timeout`（秒）：给单侧探测设上限。健康检查要传短值，
+    否则本机没起服务时 libpq 默认 5 秒超时会拖垮整个探活。
     """
     result: dict[str, dict[str, str]] = {}
 
-    # ---- 短期：Redis ----
-    short = short_backend()
-    url = os.getenv("REDIS_URL")
-    info: dict[str, str] = {"backend": short}
-    if not url:
-        info.update(alive="False", reason="未配置 REDIS_URL")
-    else:
+    def _probe_redis() -> dict[str, str]:
+        short = short_backend()
+        url = os.getenv("REDIS_URL")
+        info: dict[str, str] = {"backend": short}
+        if short != "redis":
+            # 可选拓展没启用 —— 别去连，连了只是白等几秒
+            hint = "检测到 REDIS_URL，启用请设 SHORT_TERM_BACKEND=redis" if url else "未启用"
+            return {**info, "active": "False", "alive": "N/A", "reason": f"可选拓展未启用（{hint}）"}
+        if not url:
+            return {**info, "active": "True", "alive": "False", "reason": "已启用但未配置 REDIS_URL"}
         try:
-            _ping_redis(url)
+            _ping_redis(url, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
-            info.update(alive="False", reason=f"{type(exc).__name__}: {exc}")
-        else:
-            info["alive"] = "True"
-    result["short_term"] = info
+            return {**info, "active": "True", "alive": "False", "reason": f"{type(exc).__name__}: {exc}"}
+        return {**info, "active": "True", "alive": "True", "reason": ""}
 
-    # ---- 长期：PostgreSQL ----
-    long = long_backend()
-    dsn = _dsn("PG_DSN", "POSTGRES_URL", "DATABASE_URL")
-    pinfo: dict[str, str] = {"backend": long}
-    if not dsn:
-        pinfo.update(alive="False", reason="未配置 PG_DSN")
-    else:
+    def _probe_pg() -> dict[str, str]:
+        long = long_backend()
+        dsn = _dsn("PG_DSN", "POSTGRES_URL", "DATABASE_URL")
+        info: dict[str, str] = {"backend": long}
+        if long != "postgres":
+            hint = "检测到 PG_DSN，启用请设 LONG_TERM_BACKEND=postgres" if dsn else "未启用"
+            return {**info, "active": "False", "alive": "N/A", "reason": f"可选拓展未启用（{hint}）"}
+        if not dsn:
+            return {**info, "active": "True", "alive": "False", "reason": "已启用但未配置 PG_DSN"}
         try:
             import psycopg
 
-            conn = psycopg.connect(_pg_dsn_with_timeout(dsn))
+            conn = psycopg.connect(_pg_dsn_with_timeout(dsn, timeout=timeout))
             conn.close()
         except Exception as exc:  # noqa: BLE001
-            pinfo.update(alive="False", reason=f"{type(exc).__name__}: {exc}")
-        else:
-            pinfo["alive"] = "True"
-    result["long_term"] = pinfo
+            return {**info, "active": "True", "alive": "False", "reason": f"{type(exc).__name__}: {exc}"}
+        return {**info, "active": "True", "alive": "True", "reason": ""}
+
+    # 两边并发：串行是「Redis 超时 + PG 超时」相加，并发只取较慢的那个
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_short = pool.submit(_probe_redis)
+        f_long = pool.submit(_probe_pg)
+        result["short_term"] = f_short.result()
+        result["long_term"] = f_long.result()
 
     return result
 
@@ -407,17 +431,20 @@ def _close_quietly(cm: Any) -> None:
         log.debug("关闭资源时出错（已忽略）：%s: %s", type(exc).__name__, exc)
 
 
-def _pg_dsn_with_timeout(dsn: str) -> str:
+def _pg_dsn_with_timeout(dsn: str, timeout: int | None = None) -> str:
     """给 PG 连接串补 connect_timeout。
 
     libpq 默认没有连接超时，机器/端口不通时会一直挂着，
     让「数据库没起来」表现为卡死而不是报错。这里强制补一个短超时。
+
+    显式传入 `timeout` 会覆盖 dsn 里已有的 connect_timeout —— 健康检查要用
+    自己的短上限，不能让 dsn 里的 5 秒拖垮整个探活。
     """
-    timeout = _env_int("PG_CONNECT_TIMEOUT", 5)
-    if "connect_timeout" in dsn:
-        return dsn
-    sep = "&" if "?" in dsn else "?"
-    return f"{dsn}{sep}connect_timeout={timeout}"
+    seconds = timeout if timeout is not None else _env_int("PG_CONNECT_TIMEOUT", 5)
+    # 先剥掉原有的，再按本次要求补
+    base = re.sub(r"[?&]connect_timeout=\d+", "", dsn)
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}connect_timeout={max(1, int(seconds))}"
 
 
 def _hide_pwd(dsn: str) -> str:
