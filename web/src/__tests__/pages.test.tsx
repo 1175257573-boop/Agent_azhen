@@ -108,6 +108,61 @@ it('聊天页：中断事件变成审批卡片，工具不会先执行；批准�
 })
 
 // ---------------------------------------------------------------------------
+it('聊天页：任务执行中点发送 → 弹「立即发送 / 等结束」二选一', async () => {
+  // 流挂住不关，模拟「任务还在跑」这个中间态
+  const calls = mount(<Chat />, (path, init) => {
+    if (path === '/api/chat/stream') {
+      return { sse: [{ type: 'token', data: '正在处理' }], holdMs: 4000 }
+    }
+    if (path === '/api/chat/queue' && init?.method === 'POST') {
+      return { json: { item_id: 'q1', thread_id: 'atlas-main', message: '排队消息' } }
+    }
+    return base(path)
+  })
+
+  await userEvent.type(await screen.findByPlaceholderText(/输入消息/), '第一条{Enter}')
+  await screen.findByText('正在处理')
+
+  // 任务在跑 → 点发送不该静默丢弃，而要弹选择
+  await userEvent.type(screen.getByPlaceholderText(/输入消息/), '第二条')
+  await userEvent.click(screen.getByRole('button', { name: '发送' }))
+  expect(await screen.findByText('该会话有任务正在执行，这条消息：')).toBeTruthy()
+
+  // 选项：等任务结束后发送 → 走队列接口
+  await userEvent.click(screen.getByRole('button', { name: '等任务结束后发送' }))
+  await waitFor(() => {
+    const q = findCall(calls, 'POST', '/api/chat/queue')
+    expect(q?.body).toMatchObject({ message: '第二条', thread_id: 'atlas-main' })
+  })
+})
+
+it('聊天页：「立即发送」先中断当前任务，等流结束后再把新消息发出去', async () => {
+  const calls = mount(<Chat />, (path) => {
+    if (path === '/api/chat/stream') {
+      return { sse: [{ type: 'token', data: '长任务' }], holdMs: 30_000 }
+    }
+    return base(path)
+  })
+
+  await userEvent.type(await screen.findByPlaceholderText(/输入消息/), '第一条{Enter}')
+  await screen.findByText('长任务')
+
+  await userEvent.type(screen.getByPlaceholderText(/输入消息/), '插队消息')
+  await userEvent.click(screen.getByRole('button', { name: '发送' }))
+  await userEvent.click(await screen.findByRole('button', { name: '立即发送（打断当前）' }))
+
+  // 中断 → 流结束 → pendingSend 才真正发出去（顺序反了就会撞上 streaming 保护被丢弃）
+  await waitFor(
+    () => {
+      const posts = calls.filter((c) => c.method === 'POST' && c.path === '/api/chat/stream')
+      expect(posts.length).toBe(2)
+      expect(posts[1].body).toMatchObject({ message: '插队消息' })
+    },
+    { timeout: 4000 },
+  )
+})
+
+// ---------------------------------------------------------------------------
 it('会话页：列出 / 新建 / 删除会话', async () => {
   let threads: { thread_id: string; message_count: number }[] = [{ thread_id: 'atlas-old', message_count: 4 }]
 

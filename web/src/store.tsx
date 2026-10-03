@@ -10,6 +10,7 @@ import {
 } from 'react'
 
 import { ApiError, api, historyToMessages, streamSse } from './api'
+import type { ConfirmAction, ConfirmOptions } from './components/ConfirmDialog'
 import type {
   ChatMessage,
   Decision,
@@ -86,6 +87,12 @@ interface Store {
 
   toast: (kind: Toast['kind'], text: string) => void
   toasts: Toast[]
+  /** 全局确认弹窗：await confirm({...}) 拿到 true/false */
+  confirm: (opts: ConfirmOptions) => Promise<boolean>
+  /** 需要区分「主动取消」与「Esc/点遮罩什么都不做」时用它 */
+  confirmAction: (opts: ConfirmOptions) => Promise<ConfirmAction>
+  confirmState: ConfirmOptions | null
+  resolveConfirm: (action: ConfirmAction) => void
 }
 
 const Ctx = createContext<Store | null>(null)
@@ -100,6 +107,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<PendingApproval[]>([])
   const [queue, setQueue] = useState<QueuedOut[]>([])
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [confirmState, setConfirmState] = useState<ConfirmOptions | null>(null)
+  const confirmResolver = useRef<((action: ConfirmAction) => void) | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
   const toastId = useRef(0)
@@ -112,6 +121,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const id = ++toastId.current
     setToasts((prev) => [...prev, { id, kind, text }])
     window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000)
+  }, [])
+
+  // 确认弹窗：用 Promise 把「用户点哪个」变成一段可以 await 的同步流程，
+  // 调用方写起来跟原来的 window.confirm 一样直白。
+  const confirmAction = useCallback(
+    (opts: ConfirmOptions) =>
+      new Promise<ConfirmAction>((resolve) => {
+        confirmResolver.current = resolve
+        setConfirmState(opts)
+      }),
+    [],
+  )
+
+  /** 两态够用的场景（绝大多数）：true = 点了确认 */
+  const confirm = useCallback(
+    async (opts: ConfirmOptions) => (await confirmAction(opts)) === 'confirm',
+    [confirmAction],
+  )
+
+  const resolveConfirm = useCallback((action: ConfirmAction) => {
+    confirmResolver.current?.(action)
+    confirmResolver.current = null
+    setConfirmState(null)
   }, [])
 
   const setConfig = useCallback((patch: Partial<Persisted>) => {
@@ -351,9 +383,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       refreshQueue,
       toast,
       toasts,
+      confirm,
+      confirmAction,
+      confirmState,
+      resolveConfirm,
     }),
     [
       clearChat,
+      confirm,
+      confirmAction,
+      confirmState,
       decide,
       dismiss,
       messages,
@@ -363,6 +402,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       queue,
       refreshQueue,
       reloadHistory,
+      resolveConfirm,
       send,
       setConfig,
       stop,

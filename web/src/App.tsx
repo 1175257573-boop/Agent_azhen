@@ -7,6 +7,7 @@ import Memory from './pages/Memory'
 import Queue from './pages/Queue'
 import Sessions from './pages/Sessions'
 import Settings from './pages/Settings'
+import ConfirmDialog from './components/ConfirmDialog'
 import { useStore } from './store'
 import type { HealthPayload, SystemInfo } from './types'
 
@@ -134,6 +135,7 @@ export default function App() {
       </main>
 
       <Toasts />
+      <ConfirmHost />
     </div>
   )
 }
@@ -151,12 +153,61 @@ function Pill({ label, text, ok }: { label: string; text: string; ok: boolean | 
 function Toasts() {
   const { toasts } = useStore()
   return (
-    <div className="toasts">
+    <div className="toasts" role="status" aria-live="polite">
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`}>
-          {t.text}
+          <span className="toast-icon" aria-hidden="true">
+            {t.kind === 'ok' ? (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m5 12.5 4.5 4.5L19 7.5" />
+              </svg>
+            ) : t.kind === 'error' ? (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                <path d="M12 6.5v7" />
+                <path d="M12 17.2h.01" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 11v5.5" />
+                <path d="M12 7.8h.01" />
+              </svg>
+            )}
+          </span>
+          <span className="toast-text">{t.text}</span>
         </div>
       ))}
     </div>
   )
+}
+
+function ConfirmHost() {
+  const { confirmState, confirmAction, resolveConfirm } = useStore()
+
+  // 桌面端点关闭键时，主进程会来问一句。用同一个弹窗组件承接，
+  // 样式和文案才能和应用里其他地方统一（原生 dialog 是系统样式，格格不入）。
+  useEffect(() => {
+    const bridge = window.atlasDesktop
+    if (!bridge?.onConfirmClose) return
+    return bridge.onConfirmClose(() => {
+      void (async () => {
+        const action = await confirmAction({
+          title: '要最小化，还是退出？',
+          detail:
+            '最小化：窗口收进系统托盘，后端继续运行；点托盘图标即可恢复。\n' +
+            '退出：会一并停掉本地后端服务，下次启动需要重新拉起（约 1 秒）。',
+          confirmText: '最小化到托盘',
+          cancelText: '退出（同时停止后端）',
+        })
+        // 三种结果都必须回传。dismiss（Esc / 点遮罩）虽然什么都不做，
+        // 但主进程正在等这个回话来解除「关窗询问中」的锁 —— 漏掉它，
+        // 之后每次点关闭键都会被当成"上一轮还没结束"而毫无反应。
+        await bridge.closeDecision(
+          action === 'confirm' ? 'minimize' : action === 'cancel' ? 'quit' : 'cancel',
+        )
+      })()
+    })
+  }, [confirmAction])
+
+  return <ConfirmDialog options={confirmState} onResolve={resolveConfirm} />
 }

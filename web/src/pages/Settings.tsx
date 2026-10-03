@@ -114,7 +114,7 @@ export default function Settings() {
 
 // ---------------------------------------------------------------------------
 function Credentials() {
-  const { toast } = useStore()
+  const { toast, confirm } = useStore()
   const [state, setState] = useState<CredentialState | null>(null)
   const [provider, setProvider] = useState('openai')
   const [key, setKey] = useState('')
@@ -175,7 +175,14 @@ function Credentials() {
   }
 
   const reveal = async (name: string) => {
-    if (!window.confirm(`将显示 ${name} 的完整密钥。仅在本次展示，确认查看？`)) return
+    const ok = await confirm({
+      title: '显示完整密钥？',
+      message: `即将显示 ${name} 的完整密钥。`,
+      detail: '密钥会在界面上限时展示，到点自动隐藏。截图或录屏可能把它带出去。',
+      confirmText: '显示',
+      cancelText: '取消',
+    })
+    if (!ok) return
     try {
       const res = await api.revealCredential(name)
       setRevealed({ provider: res.provider, value: res.api_key, left: res.expires_in || 15 })

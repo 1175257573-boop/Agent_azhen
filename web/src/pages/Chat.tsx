@@ -42,19 +42,48 @@ export default function Chat() {
 
   const mine = pending.filter((p) => p.thread_id === threadId)
 
+  // 任务执行中点发送时，先把这条消息扣住，等用户选怎么发
+  const [choice, setChoice] = useState<string | null>(null)
+  // 「立即发送」用：打断后要等流真正结束才能再发，否则两条流会撞在一起
+  const [pendingSend, setPendingSend] = useState<string | null>(null)
+
   const submit = async () => {
-    const text = draft
-    if (!text.trim() || streaming) return
+    const text = draft.trim()
+    if (!text) return
+    if (streaming) {
+      // 原来这里是直接 return —— 消息被静默丢弃，用户完全不知道发生了什么。
+      // 现在改成问一句，由他决定打断还是排队。
+      setChoice(text)
+      return
+    }
     setDraft('')
     await send(text)
   }
 
-  const enqueue = async () => {
-    const text = draft.trim()
+  // 「立即发送」：先中止当前任务，等 streaming 落下再把这条真正发出去
+  const sendNow = () => {
+    const text = choice
+    setChoice(null)
     if (!text) return
+    stop()
+    setPendingSend(text)
+  }
+
+  useEffect(() => {
+    if (streaming || !pendingSend) return
+    const text = pendingSend
+    setPendingSend(null)
+    setDraft('')
+    void send(text)
+  }, [streaming, pendingSend, send])
+
+  const enqueue = async (text?: string) => {
+    const content = (text ?? draft).trim()
+    if (!content) return
     try {
-      await api.queueAdd(threadId, text)
-      setDraft('')
+      await api.queueAdd(threadId, content)
+      if (text) setChoice(null)
+      else setDraft('')
       await refreshQueue()
       toast('ok', '已加入队列，本轮结束后自动发送')
     } catch (err) {
@@ -118,7 +147,19 @@ export default function Chat() {
 
       <div className="stream" ref={scroller}>
         {messages.length === 0 ? (
-          <p className="empty">还没有消息。发一句话试试；触发写文件类工具时会先弹审批。</p>
+          <div className="chat-empty">
+            <div className="chat-empty-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-3.4-.6L3 21l1.8-4.6A8.3 8.3 0 0 1 4 11.5a8.4 8.4 0 0 1 8.5-8.4 8.4 8.4 0 0 1 8.5 8.4Z" />
+              </svg>
+            </div>
+            <p className="chat-empty-title">开始一段新的对话</p>
+            <p className="chat-empty-sub">
+              Atlas 会按需调用本地工具与 MCP 能力。
+              <br />
+              涉及写文件等操作时，会先请你确认。
+            </p>
+          </div>
         ) : null}
 
         {messages.map((m) => (
@@ -167,6 +208,23 @@ export default function Chat() {
           </div>
         ) : null}
 
+        {choice ? (
+          <div className="send-choice" role="group" aria-label="任务执行中，选择发送方式">
+            <span className="send-choice-hint">该会话有任务正在执行，这条消息：</span>
+            <div className="send-choice-btns">
+              <button className="btn primary tiny" onClick={sendNow}>
+                立即发送（打断当前）
+              </button>
+              <button className="btn tiny" onClick={() => void enqueue(choice)}>
+                等任务结束后发送
+              </button>
+              <button className="btn tiny ghost" onClick={() => setChoice(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         <div className="row">
           <textarea
             value={draft}
@@ -182,19 +240,13 @@ export default function Chat() {
           />
           <div className="composer-btns">
             {streaming ? (
-              <>
-                <button className="btn primary" onClick={stop}>
-                  中止
-                </button>
-                <button className="btn" onClick={() => void enqueue()} disabled={!draft.trim()}>
-                  排队
-                </button>
-              </>
-            ) : (
-              <button className="btn primary" onClick={() => void submit()} disabled={!draft.trim()}>
-                发送
+              <button className="btn" onClick={stop}>
+                中止
               </button>
-            )}
+            ) : null}
+            <button className="btn primary" onClick={() => void submit()} disabled={!draft.trim()}>
+              发送
+            </button>
           </div>
         </div>
       </div>

@@ -41,7 +41,10 @@ pre,
 .app {
   display: grid;
   grid-template-columns: 220px 1fr;
-  height: 100%;
+  /* 固定在视口内：不让内容把网格撑破。
+     一旦 .app 高于视口，滚动条就落到 body 上，滚动时侧栏会跟着一起动。 */
+  height: 100vh;
+  overflow: hidden;
 }
 
 .nav {
@@ -51,6 +54,11 @@ pre,
   flex-direction: column;
   padding: 16px 12px;
   gap: 16px;
+  /* grid item 默认 min-height:auto（= 内容高度），内容一多就会把这一列顶高，
+     连带整个页面出现滚动条。必须显式归零，并让侧栏自己内部滚动。 */
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .brand {
@@ -158,6 +166,8 @@ pre,
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* 同 .nav：默认 min-height:auto 会让长内容顶高整列 */
+  min-height: 0;
   height: 100%;
 }
 
@@ -208,6 +218,42 @@ pre,
   min-height: 0;
   overflow: auto;
   padding: 16px;
+}
+
+/* 聊天空态：给一点点引导，不喧宾夺主 */
+.chat-empty {
+  margin: auto;
+  max-width: 420px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.chat-empty-mark {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.chat-empty-mark svg {
+  width: 22px;
+  height: 22px;
+}
+
+.chat-empty-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.chat-empty-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
 }
 
 /* ------------------------------------------------------------------ 通用 */
@@ -276,8 +322,7 @@ pre,
   border: 1px dashed var(--border);
   border-radius: var(--radius);
   padding: 20px;
-  text-align: center;
-  margin: 0;
+  text-align: center;  margin: 0;
 }
 
 .field {
@@ -319,7 +364,18 @@ textarea:focus {
   border-radius: 8px;
   padding: 7px 12px;
   font: inherit;
+  /* 中文两字按钮（如「发送」）必须显式不换行，否则会被 flex 压成竖排 */
+  white-space: nowrap;
   cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.08s ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .btn:hover:not(:disabled) {
@@ -727,15 +783,47 @@ textarea:focus {
   align-items: flex-end;
 }
 
+.composer .row textarea {
+  flex: 1;
+  /* 不加这行，textarea 会把按钮挤到 0 宽，「发送」被压成竖排 */
+  min-width: 0;
+}
+
 .composer-btns {
   display: flex;
   gap: 6px;
+  /* 按钮区不参与收缩：宁可输入框变窄，也不能让按钮变形 */
+  flex: none;
 }
 
 .queue-strip {
   font-size: 12px;
   color: var(--muted);
   margin-bottom: 6px;
+}
+
+/* 任务执行中点发送 → 紧贴发送按钮上方弹出的二选一 */
+.send-choice {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+}
+
+.send-choice-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.send-choice-btns {
+  display: flex;
+  gap: 6px;
 }
 
 /* ------------------------------------------------------------------ 审批 */
@@ -808,22 +896,187 @@ textarea:focus {
 }
 
 .toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   border-radius: 8px;
-  padding: 9px 13px;
+  padding: 10px 14px;
   box-shadow: var(--shadow);
   max-width: 380px;
   font-size: 13px;
+  line-height: 1.5;
+}
+
+.toast-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.toast-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.toast-text {
+  min-width: 0;
+  word-break: break-word;
 }
 
 .toast.error {
   border-left-color: var(--bad);
 }
+.toast.error .toast-icon {
+  color: var(--bad);
+}
 
 .toast.ok {
   border-left-color: var(--ok);
+}
+.toast.ok .toast-icon {
+  color: var(--ok);
+}
+
+/* 提示从右侧轻微滑入，停留 4s 后由 store 移除 */
+@media (prefers-reduced-motion: no-preference) {
+  .toast {
+    animation: toast-in 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+  .confirm-mask {
+    animation: mask-in 0.16s ease-out;
+  }
+  .confirm-card {
+    animation: card-in 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+
+@keyframes mask-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+}
+
+/* ------------------------------------------------------------------ 确认弹窗 */
+.confirm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(16, 24, 40, 0.34);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-card {
+  width: 100%;
+  max-width: 430px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.16);
+  padding: 20px 20px 16px;
+}
+
+.confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.confirm-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.confirm-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.confirm-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.confirm-card.warning .confirm-icon,
+.confirm-card.danger .confirm-icon {
+  color: var(--bad);
+  background: #fdecea;
+}
+
+.confirm-card.warning .confirm-icon {
+  color: var(--warn);
+  background: #fdf3e2;
+}
+
+.confirm-message {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.confirm-detail {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.btn.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #fff;
+}
+
+.btn.danger:hover:not(:disabled) {
+  filter: brightness(1.05);
+  color: #fff;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+  border-color: var(--accent);
 }
 
 @media (max-width: 720px) {
