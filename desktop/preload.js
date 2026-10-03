@@ -20,6 +20,7 @@ const channels = {
   ready: new Set(),
   failed: new Set(),
   backendExit: new Set(),
+  confirmClose: new Set(),
 };
 
 const CHANNEL_MAP = {
@@ -27,6 +28,7 @@ const CHANNEL_MAP = {
   'desktop:ready': 'ready',
   'desktop:failed': 'failed',
   'desktop:backend-exit': 'backendExit',
+  'desktop:confirm-close': 'confirmClose',
 };
 
 for (const [channel, key] of Object.entries(CHANNEL_MAP)) {
@@ -54,10 +56,14 @@ contextBridge.exposeInMainWorld('atlasDesktop', {
   onReady: subscribe('ready'),
   onFailed: subscribe('failed'),
   onBackendExit: subscribe('backendExit'),
+  /** 点关闭键时主进程来问一句：要最小化还是要退出 */
+  onConfirmClose: subscribe('confirmClose'),
 
   // ---- 请求 ----
   status: () => ipcRenderer.invoke('desktop:status'),
   restart: () => ipcRenderer.invoke('desktop:restart'),
   revealLog: () => ipcRenderer.invoke('desktop:reveal-log'),
   openExternal: (url) => ipcRenderer.invoke('desktop:open-external', url),
+  /** 回传关窗选择：'minimize' | 'quit' | 'cancel' */
+  closeDecision: (decision) => ipcRenderer.invoke('desktop:close-decision', decision),
 });

@@ -21,7 +21,7 @@
  * =============================================================================
  */
 
-const { app, BrowserWindow, ipcMain, Menu, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, Tray, shell, nativeImage } = require('electron');
 const { spawn, execFile, execFileSync } = require('node:child_process');
 const net = require('node:net');
 const path = require('node:path');
@@ -75,13 +75,48 @@ const SETTINGS_FILE = resolveSettingsFile();
 const LOG_FILE = path.join(os.homedir(), '.atlas', 'desktop.log');
 
 const HOST = '127.0.0.1';
-const PORT = Number(process.env.ATLAS_PORT || 8000);
-const BASE_URL = `http://${HOST}:${PORT}`;
+
+/**
+ * 端口在启动时解析，不写死。
+ *
+ * 写死 8000 的问题：它是最容易被别的程序占用的端口之一，撞了之后后端
+ * 会以 `OSError: [Errno 10048]` 秒退，而症状出现在很远的地方
+ * （健康检查一直连不上 → 「等待服务就绪超时」），排查成本很高。
+ *
+ * 优先级：
+ *   1) ATLAS_PORT —— 显式指定（调试、写文档、CI 都靠它）
+ *   2) 0 —— 交给操作系统分配一个当前空闲的端口，等于天然随机且永不冲突
+ *
+ * 所以下面三个都是 `let`：解析之前它们还没有值。
+ */
+let PORT = 0;
+let BASE_URL = '';
 // 新前端（web/dist 构建产物）挂在根路径，SPA 自己做路由；
 // 没构建过时后端会退回旧的 static/index.html，两种情况下根路径都能开。
-const CLIENT_URL = `${BASE_URL}/`;
+let CLIENT_URL = '';
 /** 旧版三栏控制台，作为备用入口保留（后端 /client 一直挂着） */
-const LEGACY_URL = `${BASE_URL}/client`;
+let LEGACY_URL = '';
+
+/** 让操作系统给一个当前空闲的端口（随即释放，race 窗口极小）。 */
+function pickFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, HOST, () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function resolvePort() {
+  const explicit = process.env.ATLAS_PORT;
+  PORT = explicit ? Number(explicit) : await pickFreePort();
+  BASE_URL = `http://${HOST}:${PORT}`;
+  CLIENT_URL = `${BASE_URL}/`;
+  LEGACY_URL = `${BASE_URL}/client`;
+  return PORT;
+}
 
 /** 首次启动最多等后端多久（依赖冷启动 + SQLite 建表，给足余量） */
 const READY_TIMEOUT_MS = 120_000;
@@ -93,6 +128,13 @@ let win = null;
 /** { owned: boolean, proc: ChildProcess|null, error?: string } */
 let backend = { owned: false, proc: null };
 let quitting = false;
+/** 关窗确认框是否正在显示，防止连点 X 弹出多个对话框 */
+let closeDialogOpen = false;
+/** 上面那把锁的兜底定时器：界面没回传时自动解锁，避免关闭键从此失灵 */
+let closeLockTimer = null;
+const CLOSE_LOCK_TIMEOUT_MS = 60_000;
+/** 系统托盘实例（关窗选「最小化」后靠它找回窗口） */
+let tray = null;
 let logStream = null;
 
 // ---------- 日志 -------------------------------------------------------------
@@ -270,7 +312,9 @@ async function startBackend() {
     return backend;
   }
 
-  const argv = [...py.args, 'main.py', 'web'];
+  // --port 必须显式传：端口现在是运行时挑的（ATLAS_PORT 或系统分配的空闲端口），
+  // 不传的话后端会退回自己写死的 8000，两边对不上 → 探活永远连不上。
+  const argv = [...py.args, 'main.py', 'web', '--port', String(PORT)];
   log(`启动后端：${py.cmd} ${argv.join(' ')}（cwd=${BACKEND_ROOT}）`);
 
   const proc = spawn(py.cmd, argv, {
@@ -375,6 +419,112 @@ function stopBackendSync() {
 
 // ---------- 窗口 -------------------------------------------------------------
 
+/**
+ * 关窗询问：优先用应用内那套自定义弹窗（样式统一、能讲清后果），
+ * 只有界面还没加载出来（启动页/启动失败）时才退回系统原生对话框。
+ */
+function askHowToClose() {
+  const inApp = win && !win.isDestroyed() && win.webContents.getURL().startsWith(CLIENT_URL);
+
+  const done = (decision) => {
+    clearCloseLock();
+    if (decision === 'minimize') {
+      // 最小化到托盘：窗口连任务栏一起藏起来，后端继续跑，
+      // 靠托盘图标（或托盘菜单「显示主界面」）回来
+      createTray();
+      win?.hide();
+      log('已最小化到托盘，后端继续运行');
+    } else if (decision === 'quit') {
+      quitting = true;
+      app.quit(); // before-quit / exit 钩子会负责停后端
+    }
+  };
+
+  if (inApp) {
+    win.webContents.send('desktop:confirm-close');
+    // 兜底：万一界面没回传（回调丢失、渲染进程异常、用户开着弹窗不管），
+    // 锁不能一直挂着 —— 否则之后点关闭键都毫无反应。每分钟自动解锁一次。
+    clearTimeout(closeLockTimer);
+    closeLockTimer = setTimeout(() => {
+      closeDialogOpen = false;
+      closeLockTimer = null;
+    }, CLOSE_LOCK_TIMEOUT_MS);
+    return;
+  }
+
+  dialog
+    .showMessageBox(win, {
+      type: 'question',
+      buttons: ['最小化到托盘', '退出（同时停止后端）', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+      title: 'Atlas 控制台',
+      message: '要最小化，还是退出？',
+      detail: '最小化：窗口收进系统托盘，后端继续运行。\n退出：会一并停掉本地后端服务。',
+      noLink: true,
+    })
+    .then(({ response }) => done(['minimize', 'quit', 'cancel'][response]))
+    .catch(() => done('cancel'));
+}
+
+function clearCloseLock() {
+  clearTimeout(closeLockTimer);
+  closeLockTimer = null;
+  closeDialogOpen = false;
+}
+
+/**
+ * 系统托盘。
+ *
+ * 为什么必须有：关窗时选「最小化」后窗口是隐藏的（任务栏也不留），
+ * 没有托盘图标的话用户就再也回不来了 —— 只能杀进程。
+ * 托盘是这个"最小化"语义唯一的恢复入口。
+ */
+function createTray() {
+  if (tray) return;
+  const icon = iconImage();
+  if (!icon) {
+    log('未找到可用图标，跳过托盘（此时「最小化」仍可用，窗口只是缩到任务栏）');
+    return;
+  }
+  tray = new Tray(icon);
+  tray.setToolTip('Atlas 控制台 · 运行中');
+  refreshTrayMenu();
+  tray.on('click', () => showMainWindow());
+  tray.on('double-click', () => showMainWindow());
+  log('系统托盘已就绪');
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示主界面', click: () => showMainWindow() },
+      {
+        label: '最小化到托盘',
+        click: () => {
+          win?.hide();
+        },
+      },
+      { type: 'separator' },
+      {
+        label: '完全退出（同时停止后端）',
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+}
+
+function showMainWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 function iconImage() {
   // 打包后优先用 resources 下的真实文件：asar 内路径在部分系统 API 里不可读，
   // 会导致任务栏/Alt-Tab 图标回退成 Electron 默认图标。
@@ -431,6 +581,18 @@ function createWindow() {
     }
   });
 
+  win.on('close', (event) => {
+    // 真正退出（菜单里选了退出、或正在退出流程中）时不拦截
+    if (quitting) return;
+    // 其余情况一律先问一句：最小化还是关闭。
+    // 不拦截的话窗口会被销毁，任务栏就没了，用户只能重新双击启动，
+    // 而后端也一并被 before-quit 杀掉 —— 每次开关都白等一次冷启动。
+    event.preventDefault();
+    if (closeDialogOpen) return; // 连点关闭键时只弹一个
+    closeDialogOpen = true;
+    askHowToClose();
+  });
+
   win.on('closed', () => {
     win = null;
   });
@@ -450,17 +612,17 @@ function buildMenu() {
         { label: '查看运行日志', click: () => shell.showItemInFolder(LOG_FILE) },
         { type: 'separator' },
         {
-          label: '退出并保留后端（下次秒开）',
-          accelerator: 'CmdOrCtrl+Q',
+          label: '最小化到托盘',
           click: () => {
-            writeSettings({ keepBackend: true });
-            app.quit();
+            createTray();
+            win?.hide();
           },
         },
         {
-          label: '退出并停止后端服务',
+          label: '完全退出（同时停止后端）',
+          accelerator: 'CmdOrCtrl+Q',
           click: () => {
-            writeSettings({ keepBackend: false });
+            quitting = true;
             app.quit();
           },
         },
@@ -486,6 +648,7 @@ function buildMenu() {
 async function bootstrap() {
   createWindow();
   buildMenu();
+  createTray();
 
   if (IS_DEV) log('开发者模式：已打开 DevTools');
 
@@ -571,6 +734,23 @@ ipcMain.handle('desktop:status', async () => ({
 
 ipcMain.handle('desktop:restart', async () => restartBackend());
 
+// 界面上那个自定义弹窗做完选择后回传
+ipcMain.handle('desktop:close-decision', async (_e, decision) => {
+  // 无论收到什么都要先解锁 —— 'cancel' 也要解锁：
+  // 那是用户点了遮罩/Esc 走掉的路径，早先前端在这里直接 return 不回传，
+  // 结果锁一直挂着，之后点关闭键全被 if (closeDialogOpen) return 挡掉。
+  clearCloseLock();
+  if (decision === 'minimize') {
+    createTray();
+    win?.hide();
+    log('已最小化到托盘，后端继续运行');
+  } else if (decision === 'quit') {
+    quitting = true;
+    app.quit();
+  }
+  return true;
+});
+
 ipcMain.handle('desktop:reveal-log', () => {
   try {
     shell.showItemInFolder(LOG_FILE);
@@ -587,20 +767,27 @@ ipcMain.handle('desktop:open-external', (_e, url) => {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.focus();
-    }
-  });
+  // 复用托盘的恢复逻辑：窗口现在是 hide 状态，光 restore() 唤不醒，
+  // 必须 show() + focus()，否则最小化到托盘后再双击图标会毫无反应
+  app.on('second-instance', () => showMainWindow());
 
   app.whenReady().then(() => {
     initLog();
     log(`=== Atlas 控制台启动（Electron ${process.versions.electron} / ${process.platform}）===`);
-    bootstrap().catch((err) => {
-      log(`启动流程异常：${err?.stack || err}`);
-      notYet('BOOTSTRAP_ERROR');
-    });
+    // 端口必须在建窗、探活、拼 URL 之前定下来
+    return resolvePort()
+      .then((p) => {
+        log(
+          process.env.ATLAS_PORT
+            ? `使用指定端口 ATLAS_PORT=${p}`
+            : `未指定 ATLAS_PORT，选用空闲端口 ${p}（避免与本机其他服务冲突）`,
+        );
+      })
+      .then(() => bootstrap())
+      .catch((err) => {
+        log(`启动流程异常：${err?.stack || err}`);
+        notYet('BOOTSTRAP_ERROR');
+      });
   });
 }
 
@@ -609,22 +796,27 @@ app.on('window-all-closed', () => {
 });
 
 /**
- * 退出时要不要顺手停掉后端。默认**保留**：
- * 后端冷启动实测 1.3s（其中 0.9s 是 Python 导入几百个模块，停不掉的），
- * 而复用已有服务几乎零成本。保留后下次启动只需等 Electron 自己起来。
- * 想彻底停：菜单「退出并停止后端服务」，或 ATLAS_KEEP_BACKEND=0。
+ * 退出时要不要顺手停掉后端。默认**停**——
+ * 关窗弹窗里的「退出（同时停止后端）」就是这个语义，不留孤儿进程。
+ *
+ * 想让它留在后台（频繁开关、或做 CI / 开发调试）：
+ *     set ATLAS_KEEP_BACKEND=1
+ * 正常用不到这个开关：想快就选「最小化」，窗口还在，后端自然也还在。
  */
 function shouldKeepBackend() {
-  const s = readSettings();
-  if (s.keepBackend === false) return false;
+  if (process.env.ATLAS_KEEP_BACKEND === '1') return true;
   if (process.env.ATLAS_KEEP_BACKEND === '0') return false;
-  return true;
+  return false;
 }
 
 app.on('before-quit', () => {
   quitting = true;
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
   if (shouldKeepBackend()) {
-    log('退出但保留后端服务（下次启动直接复用；菜单可改为停止）');
+    log('退出但按 ATLAS_KEEP_BACKEND=1 保留后端服务');
     return;
   }
   stopBackendSync();

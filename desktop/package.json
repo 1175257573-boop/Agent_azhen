@@ -19,6 +19,7 @@
   "build": {
     "appId": "cn.atlas.desktop",
     "productName": "Atlas 控制台",
+    "executableName": "atlas",
     "copyright": "Copyright © 2026 He Kezhen",
     "directories": {
       "output": "dist"
