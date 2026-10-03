@@ -196,6 +196,22 @@ def build_checkpointer(mode: str | None = None) -> Any:
     return InMemorySaver()
 
 
+_SHARED_CHECKPOINTER: Any = None
+
+
+def shared_checkpointer() -> Any:
+    """进程内复用同一个 checkpointer，供只读接口（会话列表等）使用。
+
+    为什么不能直接调 `build_checkpointer()`：它每次都会新建连接并注册 atexit，
+    在 `/api/chat/threads` 这种会被反复调用的只读接口上用，
+    等于每刷新一次列表就多一条永不释放的连接。
+    """
+    global _SHARED_CHECKPOINTER
+    if _SHARED_CHECKPOINTER is None:
+        _SHARED_CHECKPOINTER = build_checkpointer()
+    return _SHARED_CHECKPOINTER
+
+
 async def build_async_checkpointer(mode: str | None = None) -> Any:
     """异步链路专用的短期记忆。**不要拿 build_checkpointer() 顶替**。
 

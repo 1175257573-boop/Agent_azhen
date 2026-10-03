@@ -29,8 +29,17 @@ export default function Sessions() {
     try {
       const created = await api.newThread()
       newThread(created.thread_id)
+      // 先拉后端列表，再乐观补一条：新会话此刻一条消息都没有，
+      // 后端是从 checkpoint 里扫会话的，它必然不在返回结果里，
+      // 只 load() 的话列表看起来完全没变化，用户会以为新建没生效。
+      // 顺序上必须「先 load 后插入」，否则会盖掉后端返回的真实顺序。
       await load()
-      toast('ok', `已新建会话 ${created.thread_id}`)
+      setThreads((prev) =>
+        prev.some((t) => t.thread_id === created.thread_id)
+          ? prev
+          : [{ thread_id: created.thread_id, message_count: 0 }, ...prev],
+      )
+      toast('ok', `已新建会话 ${created.thread_id}，发送第一条消息后自动保存`)
     } catch (err) {
       toast('error', `新建失败：${err instanceof Error ? err.message : err}`)
     }
@@ -85,7 +94,9 @@ export default function Sessions() {
 
       {threads.length === 0 ? (
         <p className="empty">
-          {loading ? '加载中…' : '会话列表为空。当前短期记忆后端可能不支持扫描（内存 / 部分 SQLite 后端），可在下方直接输入会话 ID 切换。'}
+          {loading
+            ? '加载中…'
+            : '还没有任何历史会话。新建一个开始对话，发送消息后会自动出现在这里；也可以在下方直接输入会话 ID 切换。'}
         </p>
       ) : (
         <ul className="thread-list">

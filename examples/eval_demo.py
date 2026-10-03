@@ -15,6 +15,7 @@ import argparse
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from agent_kit import memory as mem
 from agent_kit.agent import build_agent
@@ -54,6 +55,10 @@ def run_offline() -> EvalReport:
             AgentSettings(provider="fake"),
             model=ScriptedChatModel(script=script),
             include_write_tools=False,
+            # 评估是一次性跑分，会话不该留下。不传的话 build_agent 会用
+            # 默认的 SQLite 库（~/.atlas/atlas.db），于是每跑一次评估，
+            # 用户的真实会话列表里就多出一批 eval-* 的垃圾会话。
+            checkpointer=InMemorySaver(),
         )
         result = built.graph.invoke(
             {"messages": [HumanMessage(content=sc.case.query)]},
@@ -82,7 +87,7 @@ def run_real() -> EvalReport:
             "  只想验证评估框架本身：python main.py eval"
         )
     require_api_key(settings)
-    built = build_agent(settings, include_write_tools=False)
+    built = build_agent(settings, include_write_tools=False, checkpointer=InMemorySaver())
     report = _Report()
     for case in REAL_CASES:
         result = built.graph.invoke(
