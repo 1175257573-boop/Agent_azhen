@@ -105,6 +105,27 @@ const FAILURE_GUIDE = {
     body: '桌面壳自身在启动过程中抛了异常。',
     suggest: () => '展开下方「运行日志」查看完整堆栈。',
   },
+  BACKEND_EXITED: {
+    title: '后端启动后立刻退出',
+    body: '进程起来了，但没撑过健康检查就退了 —— 所以界面连不上。',
+    suggest: (ctx) => {
+      const lines = [
+        '最常见原因（按概率排序）：',
+        '  1) 8000 端口被上一个没退干净的进程占着',
+        '     → 菜单「重启后端服务」，或先用任务管理器结束占用进程',
+        '  2) Python 依赖不完整（uvicorn / fastapi 缺了）',
+        '     → python -m pip install -r requirements.txt',
+        '  3) 解释器换了位置，桌面端还在用旧的',
+        '     → 菜单「退出并停止后端服务」后重新启动，让它重新探测',
+        '',
+        '展开下方「运行日志」，最后几行就是退出原因。',
+      ];
+      if (ctx.packaged) {
+        lines.push('', '后端代码目录：' + (ctx.backendRoot || '(未知)'));
+      }
+      return lines.join('\n');
+    },
+  },
 };
 
 function showFailure(payload) {

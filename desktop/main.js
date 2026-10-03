@@ -23,6 +23,7 @@
 
 const { app, BrowserWindow, ipcMain, Menu, shell, nativeImage } = require('electron');
 const { spawn, execFile, execFileSync } = require('node:child_process');
+const net = require('node:net');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -187,22 +188,36 @@ function interpreterCandidates() {
  * 试跑一个解释器，确认它 **不仅能启动，而且依赖装齐了**。
  * 只验证 `python --version` 是不够的 —— 那只能证明有 Python，不能证明有 FastAPI。
  */
-function probeInterpreter(cmd, args) {
+function probeInterpreter(cmd, args, { light = false } = {}) {
   return new Promise((resolve) => {
-    execFile(
-      cmd,
-      [...args, '-c', 'import sys, uvicorn, fastapi; print(sys.version.split()[0])'],
-      { timeout: 25_000, windowsHide: true },
-      (err, stdout) => {
-        if (err) return resolve(null);
-        const out = String(stdout).trim().split(/\r?\n/).filter(Boolean).pop();
-        return resolve(out || null);
-      },
-    );
+    // 轻量模式只验证「解释器能跑」，不 import 依赖；完整模式才验证依赖齐全。
+    const script = light
+      ? 'import sys; print(sys.version.split()[0])'
+      : 'import sys, uvicorn, fastapi; print(sys.version.split()[0])';
+    execFile(cmd, [...args, '-c', script], { timeout: 25_000, windowsHide: true }, (err, stdout) => {
+      if (err) return resolve(null);
+      const out = String(stdout).trim().split(/\r?\n/).filter(Boolean).pop();
+      return resolve(out || null);
+    });
   });
 }
 
 async function pickInterpreter() {
+  // 快路径：上次成功用过的解释器，只做「能不能跑起来」的轻量验证（~250ms），
+  // 不再 import uvicorn/fastapi（那要 ~880ms，而这份结果马上就用不上了——
+  // 后端是另一个进程，导入成果不共享）。依赖真缺失时后端会秒退，
+  // 由 BACKEND_EXITED 指引告诉用户怎么修。
+  if (!process.env.ATLAS_PYTHON) {
+    const remembered = readSettings().python;
+    if (remembered && fs.existsSync(remembered)) {
+      const version = await probeInterpreter(remembered, [], { light: true });
+      if (version) {
+        log(`解释器快路径：复用 ${remembered} → Python ${version}（跳过依赖探测）`);
+        return { cmd: remembered, args: [], label: '上次成功使用的解释器', version };
+      }
+    }
+  }
+
   const seen = new Set();
   for (const c of interpreterCandidates()) {
     const key = `${c.cmd}|${c.args.join(' ')}`.toLowerCase();
@@ -224,9 +239,13 @@ async function pickInterpreter() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function pingHealth(timeout = 1500) {
+function pingHealth(timeout = 3000) {
   return new Promise((resolve) => {
-    const req = http.get(`${BASE_URL}/api/health`, { timeout }, (res) => {
+    // probe_backends=false 是关键：默认 true 时后端会真去拨 Redis / 连 PostgreSQL，
+    // 连不上就卡到 7 秒以上（实测 7100ms），而这里 timeout 只有几秒 →
+    // 每次探测都在后端返回前就判失败，waitReady 一直重试到 120 秒超时。
+    // 启动轮询只关心「进程活着没」，后端连通性由界面上的状态展示负责。
+    const req = http.get(`${BASE_URL}/api/health?probe_backends=false`, { timeout }, (res) => {
       res.resume();
       resolve(res.statusCode === 200);
     });
@@ -281,13 +300,47 @@ async function startBackend() {
   return backend;
 }
 
+/**
+ * 端口是否已空出来。
+ * 杀进程 ≠ 端口立刻可绑定：taskkill 返回时子进程可能还在收尾，
+ * 新后端导入完依赖（~1s）再去 bind，往往正好撞上 10048。
+ */
+function probePortFree() {
+  return new Promise((resolve) => {
+    const s = net.connect({ host: '127.0.0.1', port: PORT });
+    const done = (free) => {
+      try {
+        s.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(free);
+    };
+    s.setTimeout(400, () => done(true)); // 连不上即视为已释放
+    s.once('connect', () => done(false)); // 还能连上说明仍被占用
+    s.once('error', () => done(true));
+  });
+}
+
+async function waitPortFree(timeoutMs = 8000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (await probePortFree()) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
 async function waitReady(timeoutMs = READY_TIMEOUT_MS) {
   const t0 = Date.now();
+  // 退避而不是固定 600ms：后端通常 1.3s 就绪，600ms 的格子会白等半秒以上。
+  let delay = 60;
   while (Date.now() - t0 < timeoutMs) {
     if (await pingHealth()) return true;
     // 后端进程已经死了就别再空等
     if (backend.owned && !backend.proc) return false;
-    await sleep(600);
+    await sleep(delay);
+    delay = Math.min(Math.round(delay * 1.5), 300);
   }
   return false;
 }
@@ -396,7 +449,21 @@ function buildMenu() {
         { label: '在浏览器中打开', click: () => shell.openExternal(CLIENT_URL) },
         { label: '查看运行日志', click: () => shell.showItemInFolder(LOG_FILE) },
         { type: 'separator' },
-        { label: '退出', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
+        {
+          label: '退出并保留后端（下次秒开）',
+          accelerator: 'CmdOrCtrl+Q',
+          click: () => {
+            writeSettings({ keepBackend: true });
+            app.quit();
+          },
+        },
+        {
+          label: '退出并停止后端服务',
+          click: () => {
+            writeSettings({ keepBackend: false });
+            app.quit();
+          },
+        },
       ],
     },
     {
@@ -448,12 +515,27 @@ async function bootstrap() {
 async function restartBackend() {
   log('收到重启后端请求');
   stopBackendSync();
-  await sleep(900);
+  // 固定等 900ms 是不够的：端口没真正释放时，新后端 bind 会撞 10048 然后秒退。
+  const freed = await waitPortFree();
+  if (!freed) log('端口仍被占用，继续启动（可能仍会失败，日志里有原因）');
   const state = await startBackend();
   if (state.error === 'NO_PYTHON') return notYet('NO_PYTHON');
   const ok = await waitReady();
+  if (!ok) {
+    // 这里以前不看 ok 就 loadURL：后端没起来时把窗口甩到没人监听的端口，
+    // Chromium 直接显示 ERR_CONNECTION_REFUSED（用户看到的「连接不上服务器」）。
+    const code = backend.owned && !backend.proc ? 'BACKEND_EXITED' : 'TIMEOUT';
+    log(`重启后未就绪（${code}），保留启动页并给出指引`);
+    if (code === 'BACKEND_EXITED' && readSettings().python) {
+      // 后端秒退多半是记住的解释器已经失效（venv 重建 / 换了机器），
+      // 清掉记忆，下一次启动才会走完整的候选列表重新探测。
+      writeSettings({ python: '' });
+      log('已清除记住的解释器，下次启动将重新探测');
+    }
+    return notYet(code);
+  }
   if (win && !win.isDestroyed()) win.loadURL(CLIENT_URL);
-  return ok;
+  return true;
 }
 
 function notYet(code) {
@@ -526,13 +608,31 @@ app.on('window-all-closed', () => {
   app.quit();
 });
 
+/**
+ * 退出时要不要顺手停掉后端。默认**保留**：
+ * 后端冷启动实测 1.3s（其中 0.9s 是 Python 导入几百个模块，停不掉的），
+ * 而复用已有服务几乎零成本。保留后下次启动只需等 Electron 自己起来。
+ * 想彻底停：菜单「退出并停止后端服务」，或 ATLAS_KEEP_BACKEND=0。
+ */
+function shouldKeepBackend() {
+  const s = readSettings();
+  if (s.keepBackend === false) return false;
+  if (process.env.ATLAS_KEEP_BACKEND === '0') return false;
+  return true;
+}
+
 app.on('before-quit', () => {
   quitting = true;
+  if (shouldKeepBackend()) {
+    log('退出但保留后端服务（下次启动直接复用；菜单可改为停止）');
+    return;
+  }
   stopBackendSync();
 });
 
 // 兜底：无论从哪条路径退出，都不该留下孤儿后端
 process.on('exit', () => {
   quitting = true;
+  if (shouldKeepBackend()) return;
   stopBackendSync();
 });
