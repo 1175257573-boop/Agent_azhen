@@ -155,18 +155,23 @@ def cmd_review(args: argparse.Namespace) -> int:
     """
     from collections.abc import Callable
 
-    from agent_kit.config import AgentSettings, build_chat_model, detect_provider
+    from agent_kit.config import AgentSettings, build_chat_model
     from agent_kit.multi_agent import review as review_mod
 
     judge: Callable[[str], str] | None = None
-    provider = "fake"
+    # 走 AgentSettings 自己的解析（LLM_PROVIDER > atlas.toml > 自动探测），
+    # **不要直接调 detect_provider()**——那会绕过用户在环境变量里的显式指定。
+    # 实测踩过：本机同时有 DEEPSEEK_API_KEY（失效）与 DASHSCOPE_API_KEY（可用），
+    # 且 LLM_PROVIDER=dashscope；detect_provider() 按 openai→deepseek→dashscope
+    # 的顺序先命中失效的那个，于是明明配了可用 key 却报 401。
+    settings = AgentSettings()
+    provider = settings.provider
     if not args.no_judge:
         try:
-            provider = detect_provider()
             if provider == "fake":
                 print("[info] 未检测到任何模型 Key，本次为降级报告：只出证据清单，不下结论。")
             else:
-                model = build_chat_model(AgentSettings(provider=provider))
+                model = build_chat_model(settings)
 
                 def judge(prompt: str) -> str:  # type: ignore[misc]
                     return str(model.invoke(prompt).content)
@@ -174,12 +179,17 @@ def cmd_review(args: argparse.Namespace) -> int:
             print(f"[warn] 模型不可用，转为降级报告：{exc}")
             judge = None
 
-    report = review_mod.run_review(args.path, judge=judge)
+    report = review_mod.run_review(
+        args.path,
+        judge=judge,
+        with_modules=args.modules,
+        module_top_n=args.module_top,
+        module_batch=args.module_batch,
+    )
     text = review_mod.render_markdown(report)
     print(text)
 
     if args.out:
-        settings = AgentSettings(provider=provider)
         dest = settings.sandbox_dir / args.out
         dest.write_text(text, encoding="utf-8")
         print(f"\n报告已写入：{dest}")
@@ -455,6 +465,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("--path", default=".", help="被评仓库路径，默认当前目录")
     p_review.add_argument("--out", default="", help="把报告写到 runs/ 下，如 --out review.md")
     p_review.add_argument("--no-judge", action="store_true", help="强制降级：只出证据清单，不调模型")
+    p_review.add_argument(
+        "--modules", action="store_true",
+        help="额外做模块职责分析（切分仓库、读核心模块，报告里给「模块总览」）",
+    )
+    p_review.add_argument(
+        "--module-top", type=int, default=9,
+        help="分析多少个核心模块，默认 9（按代码量/入口/被依赖数排序）",
+    )
+    p_review.add_argument(
+        "--module-batch", type=int, default=3,
+        help="每批几个模块，默认 3（太多会互相干扰：模型会把相邻模块职责搞混）",
+    )
     p_review.set_defaults(func=cmd_review)
 
     p_ret = sub.add_parser("retrievers", parents=[common], help="检索扩展点自检（列出已注册检索器）")

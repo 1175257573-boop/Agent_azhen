@@ -149,6 +149,10 @@ class ReviewReport(BaseModel):
     #: 与「没取到证」必须区分开——前者是工具挂了，后者是查了没查出来。
     #: 报告里不写清楚，读者会把「模型 401」误读成「这个维度没问题也没证据」。
     failures: list[str] = Field(default_factory=list, description="专家未交回执的原因（降级诊断用）")
+    #: 模块职责分析结果（ModuleAnalysisResult 或其 modules 列表）。
+    #: 类型刻意写成 Any：这个模块不该 import module_analysis，否则两个
+    #: 评审模块会互相依赖。渲染层只用 getattr 取字段，duck typing 足够。
+    modules: Any = Field(default=None, description="模块职责分析结果（可为空）")
 
     def blockers(self) -> list[Finding]:
         return [f for f in self.findings if f.verdict == BLOCKER]
@@ -470,6 +474,9 @@ def run_review(
     judge: Callable[[str], str] | None = None,
     max_workers: int = 4,
     timeout: float = 60.0,
+    with_modules: bool = False,
+    module_top_n: int = 9,
+    module_batch: int = 3,
 ) -> ReviewReport:
     """跑一次评审。
 
@@ -479,6 +486,11 @@ def run_review(
                **传 None 则降级**：只出证据清单，不下结论（`degraded=True`）
         max_workers: 同时几个专家在判断
         timeout: 整轮判断的墙钟上限
+        with_modules: 是否额外做「模块职责分析」。默认关——
+                     它要额外调几次模型，而有些场景（只想看有没有测试/密钥）
+                     并不需要知道每个模块是干什么的。
+        module_top_n: 分析多少个核心模块
+        module_batch: 每批几个模块
 
     两段式：先串行取证（进程级 set_root，不能并发），再并行判断。
     """
@@ -491,6 +503,24 @@ def run_review(
     degraded = judge is None
     if degraded:
         log.warning("未提供判断模型，本次只出证据清单，不下结论")
+
+    # 模块职责分析。放在取证之后、判断之前——它要先拿到模块画像。
+    # 刻意不并入四位专家的 fanout：那边的 worker 只读取证摘要，
+    # 而模块分析要读的是另一套摘要（module_digest），prompt 形态完全不同。
+    module_result = None
+    if with_modules:
+        from agent_kit.module_analysis import analyze_modules
+        from agent_kit.modules import scan_modules
+
+        try:
+            scan = scan_modules(root_path)
+            module_result = analyze_modules(
+                root_path, scan, judge,
+                top_n=module_top_n, batch_size=module_batch,
+                max_workers=max_workers, timeout=timeout * 2,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 模块分析失败不该让整份报告出不来
+            log.warning("模块职责分析失败，本次报告不含模块总览：%s", exc)
 
     def _worker(task: TaskSpec) -> list[Finding]:
         group = next(g for g in EXPERT_GROUPS if g["name"] == task.name)
@@ -550,6 +580,7 @@ def run_review(
         uncovered=uncovered,
         degraded=degraded,
         failures=failures,
+        modules=module_result,
     )
 
 
@@ -614,6 +645,42 @@ def _headline(
 # ---------------------------------------------------------------------------
 # 四、渲染
 # ---------------------------------------------------------------------------
+def _module_section(modules: Any) -> list[str]:
+    """渲染「模块总览」。
+
+    为什么放在建议项之后、未覆盖之前：先说**问题**（阻断/建议），
+    再说**这是个什么项目**（模块职责），最后才是没查到的部分。
+    顺序反过来会让人先读一堆模块介绍才看到该改什么。
+    """
+    items = getattr(modules, "modules", modules)   # 兼容 result 对象与裸列表
+    if not items:
+        return []
+    items = list(items)
+    out = ["## 模块总览", ""]
+    judged = sum(1 for m in items if getattr(m, "judged", False))
+    out.append(
+        f"共分析 {len(items)} 个核心模块（按代码量、入口、被依赖数排序），"
+        f"其中 {judged} 个取得职责判断。\n"
+    )
+    for m in items:
+        mark = "" if getattr(m, "judged", False) else "（未取得判断）"
+        out.append(f"- **{m.name}**{mark}  `{getattr(m, 'path', '')}`")
+        purpose = str(getattr(m, "purpose", "")).strip()
+        if purpose:
+            out.append(f"  - 职责：{purpose}")
+        concerns = list(getattr(m, "concerns", []) or [])
+        if concerns:
+            for c in concerns[:3]:
+                out.append(f"  - ⚠ 疑点：{c}")
+            if len(concerns) > 3:
+                out.append(f"  - （另有 {len(concerns) - 3} 条疑点）")
+        evidence_text = str(getattr(m, "evidence", "")).strip()
+        if evidence_text:
+            out.append(f"  - 依据：{evidence_text[:160]}")
+    out.append("")
+    return out
+
+
 def render_markdown(report: ReviewReport, *, evidence: dict[str, dict] | None = None) -> str:
     """报告渲染成 Markdown。格式固定，不自由发挥——评审报告要给多人传阅。"""
     lines: list[str] = [
@@ -668,6 +735,8 @@ def render_markdown(report: ReviewReport, *, evidence: dict[str, dict] | None = 
     _section("阻断项（必须改）", report.blockers())
     _section("建议项（改了更好）", report.suggestions())
     _section("做得好的地方", report.goods())
+
+    lines += _module_section(report.modules)
 
     lines.append("## 未覆盖")
     lines.append("")
