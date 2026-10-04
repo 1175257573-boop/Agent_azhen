@@ -145,6 +145,10 @@ class ReviewReport(BaseModel):
     conflicts: list[str] = Field(default_factory=list, description="专家之间打架的结论")
     uncovered: list[str] = Field(default_factory=list, description="本次没查到证的维度")
     degraded: bool = Field(default=False, description="True = 没有模型，只出证据不下结论")
+    #: 模型环节实际失败的原因（鉴权失败 / 超时 / 解析失败…）。
+    #: 与「没取到证」必须区分开——前者是工具挂了，后者是查了没查出来。
+    #: 报告里不写清楚，读者会把「模型 401」误读成「这个维度没问题也没证据」。
+    failures: list[str] = Field(default_factory=list, description="专家未交回执的原因（降级诊断用）")
 
     def blockers(self) -> list[Finding]:
         return [f for f in self.findings if f.verdict == BLOCKER]
@@ -500,11 +504,20 @@ def run_review(
     results = run_fanout(tasks, _worker, max_workers=max_workers, timeout=timeout)
 
     model_findings: list[Finding] = []
+    failures: list[str] = []
     for item in results:
         if item.ok and isinstance(item.output, list):
             model_findings.extend(item.output)
         elif not item.ok:
+            reason = _short_reason(item.error)
             log.warning("专家 %s 未交回执：%s", item.name, item.error or "超时")
+            failures.append(f"{item.name}：{reason}")
+
+    # 判定条件是「**所有**专家都没交回执」，不是「没拿到有效结论」：
+    # 专家返回了内容但维度被过滤掉（模型给了不属于它的维度）属于模型能力问题，
+    # 照实记进 failures 即可；只有一次都没成功才是工具挂了。
+    if failures and len(failures) == len(results):
+        degraded = True
 
     model_findings = _enforce_evidence(model_findings)
 
@@ -525,7 +538,7 @@ def run_review(
     judged = {_dimension_id(f.dimension) for f in findings if f.verdict != UNCOVERED}
     uncovered = [name for dim, name in DIMENSIONS if dim not in judged]
 
-    headline = _headline(findings, uncovered, degraded)
+    headline = _headline(findings, uncovered, degraded, bool(failures))
     return ReviewReport(
         repo=str(root_path),
         # 与 tools._now() 同一套口径：UTC 取值后转本地时区，
@@ -536,7 +549,34 @@ def run_review(
         conflicts=conflicts,
         uncovered=uncovered,
         degraded=degraded,
+        failures=failures,
     )
+
+
+def _short_reason(error: str | None) -> str:
+    """把异常压成一句人话，写进报告里给读者看。
+
+    原始异常动辄几百字符（httpx 的请求上下文、LangChain 的重试栈），
+    整段塞进报告会淹没结论。这里只留最能定位问题的那一句：
+    鉴权 / 限流 / 超时 / 连接 / 其他。
+    """
+    text = (error or "").strip()
+    if not text:
+        return "超时未返回"
+    low = text.lower()
+    if "401" in text or "unauthorized" in low or "authentication" in low or "api key" in low:
+        return "模型鉴权失败（API Key 无效或未生效）"
+    if "403" in text or "forbidden" in low:
+        return "模型拒绝了请求（权限或额度不足）"
+    if "429" in text or "rate" in low or "quota" in low:
+        return "触发限流或额度用尽"
+    if "timeout" in low or "timed out" in low:
+        return "调用超时"
+    if "connection" in low or "connect" in low:
+        return "网络连接失败"
+    if "json" in low or "parse" in low:
+        return "模型返回内容无法解析"
+    return text.splitlines()[0][:120]
 
 
 def _dimension_id(value: str) -> str:
@@ -549,16 +589,26 @@ def _dimension_id(value: str) -> str:
     return value
 
 
-def _headline(findings: list[Finding], uncovered: list[str], degraded: bool) -> str:
+def _headline(
+    findings: list[Finding],
+    uncovered: list[str],
+    degraded: bool,
+    model_failed: bool = False,
+) -> str:
     blockers = [f for f in findings if f.verdict == BLOCKER]
-    suffix = ""
-    if degraded:
-        suffix = "（未接入判断模型：以下结论全部由取证规则直接推出，未经模型判断）"
+    # 三种情况必须说不同的话：模型挂了 ≠ 没接模型 ≠ 一切正常
+    if model_failed:
+        tail = "（**判断模型调用失败**，下列结论仅来自静态取证，维度判断缺失）"
+    elif degraded:
+        tail = "（未接入判断模型：以下结论全部由取证规则直接推出，未经模型判断）"
+    else:
+        tail = ""
     if blockers:
-        return f"{len(blockers)} 项阻断，需先处理后再进入下一阶段{suffix}"
+        return f"{len(blockers)} 项阻断，需先处理后再进入下一阶段{tail}"
     if uncovered:
-        return f"未发现阻断项，但 {len(uncovered)} 个维度缺证据、需人工确认{suffix}"
-    return f"合格：八项均已取证，未发现阻断项{suffix}"
+        what = "维度判断缺失" if model_failed else "维度缺证据、需人工确认"
+        return f"未发现阻断项，但 {len(uncovered)} 个{what}{tail}"
+    return f"合格：八项均已取证，未发现阻断项{tail}"
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +628,22 @@ def render_markdown(report: ReviewReport, *, evidence: dict[str, dict] | None = 
         "",
     ]
 
-    if report.degraded:
+    if report.failures:
+        lines += [
+            "> 🚨 **判断模型全部调用失败**，本次结论只来自静态取证，维度判断缺失。",
+            "> 这不是「查了没查到」，而是**工具没能完成判断**——下面列出的「未覆盖」维度属于这种情况：",
+            "",
+        ]
+        for item in report.failures:
+            lines.append(f"> - {item}")
+        lines.append("")
+        lines += [
+            "> 排查顺序：① 确认 API Key 有效且额度充足（配置页「查看」可验证）；",
+            "> ② 确认网络可达（模型服务是否被代理拦截）；③ 确认模型名与 Key 匹配。",
+            "",
+        ]
+
+    if report.degraded and not report.failures:
         lines += [
             "> ⚠️ 本次为**降级报告**：没有可用的判断模型。",
             "> 下面的结论全部由取证规则直接推出（有没有测试、依赖钉没钉版本、有没有疑似密钥），",

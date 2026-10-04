@@ -184,6 +184,65 @@ def test_degraded_run_only_claims_what_evidence_proves(tiny_repo):
     assert "降级" not in report.headline or "模型" in report.headline
 
 
+def test_model_failure_is_not_reported_as_missing_evidence(tiny_repo):
+    """模型全挂 ≠ 没取到证 —— 报告必须说出真相。
+
+    实测踩过：deepseek key 失效返回 401，四个专家全部交白卷，
+    但报告里写的是「4 个维度缺证据、需人工确认」——
+    读者会误以为是查了没查到，而不是工具压根没跑起来。
+    """
+    def dead_judge(prompt: str) -> str:
+        raise RuntimeError("Error code: 401 - {'error': {'message': 'Incorrect API key provided'}}")
+
+    report = run_review(tiny_repo, judge=dead_judge, timeout=30)
+
+    assert report.failures, "专家没交回执时必须记录原因"
+    assert len(report.failures) == len(EXPERT_GROUPS)
+    assert all("鉴权" in f for f in report.failures), report.failures
+    assert report.degraded is True
+    # 总评不能说成「缺证据」
+    assert "缺证据" not in report.headline
+    assert "模型" in report.headline
+
+    md = render_markdown(report)
+    assert "判断模型全部调用失败" in md
+    assert "401" not in md, "原始异常不该整段进报告"
+    assert "API Key" in md, "要给排查线索"
+
+
+def test_model_failure_reason_is_classified(tiny_repo):
+    """不同失败原因要说不同的话，否则排查方向会被带偏。"""
+    from agent_kit.multi_agent.review import _short_reason
+
+    assert "鉴权" in _short_reason("Error code: 401 - Incorrect API key provided")
+    assert "限流" in _short_reason("HTTP 429 Too Many Requests")
+    assert "超时" in _short_reason("Request timed out after 60s")
+    assert "超时" in _short_reason(None)
+    assert len(_short_reason("x" * 500)) <= 120
+
+
+def test_partial_model_failure_still_reports_its_dimensions(tiny_repo):
+    """部分专家挂掉时，挂掉的要记原因，正常给的结论要保留。"""
+    calls = {"n": 0}
+
+    def flaky_judge(prompt: str) -> str:
+        calls["n"] += 1
+        if "依赖与安全" in prompt:
+            raise RuntimeError("Error code: 401 - Incorrect API key provided")
+        if "质量与测试" in prompt:
+            return json.dumps({"findings": [{
+                "dimension": "tests", "verdict": "good",
+                "fact": "有测试", "evidence": "check_tests: test_cases=3",
+            }]})
+        return "[]"
+
+    report = run_review(tiny_repo, judge=flaky_judge, timeout=30)
+
+    assert report.failures, "挂掉的专家要记原因"
+    assert not report.degraded, "还有专家交回执，不算整体降级"
+    assert any("鉴权" in f for f in report.failures)
+
+
 def test_scripted_judge_produces_findings(tiny_repo):
     def judge(prompt: str) -> str:
         if "依赖与安全" in prompt:
