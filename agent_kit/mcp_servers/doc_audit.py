@@ -41,9 +41,12 @@ LINK_RE = re.compile(r"\[[^\]]+\]\(#([^)]+)\)")
 EXPECTED_FILES: dict[str, tuple[str, ...]] = {
     "README.md": ("README.md", "README.rst", "README.txt"),
     "LICENSE": ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.txt"),
-    "CHANGELOG.md": ("CHANGELOG.md", "CHANGES.md", "HISTORY.md"),
-    "CONTRIBUTING.md": ("CONTRIBUTING.md", "CONTRIBUTING.rst", "CONTRIBUTING.txt"),
-    "SECURITY.md": ("SECURITY.md", "SECURITY.rst"),
+    "CHANGELOG.md": ("CHANGELOG.md", "CHANGES.md", "HISTORY.md", "CHANGELOG", "CHANGES"),
+    "CONTRIBUTING.md": ("CONTRIBUTING.md", "CONTRIBUTING.rst", "CONTRIBUTING.txt", "CONTRIBUTING"),
+    # SAFETY.md 是 SECURITY.md 的常见等价物（Hugging Face、部分基金会与厂商仓库用这个名字）。
+    # 漏了它会把规范齐全的好仓库判成「缺安全文档」（评审 deepseek-harness 实测）。
+    "SECURITY.md": ("SECURITY.md", "SECURITY.rst", "SECURITY.txt", "SECURITY",
+                    "SAFETY.md", "SAFETY.rst", "SAFETY"),
     ".gitignore": (".gitignore",),
     ".github/workflows": (".github/workflows", ".gitlab-ci.yml", "azure-pipelines.yml"),
 }

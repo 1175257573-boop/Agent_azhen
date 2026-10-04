@@ -26,7 +26,13 @@ if __package__ in (None, ""):
 
 from fastmcp import FastMCP
 
-from agent_kit.mcp_servers._common import iter_code_files, project_root, rel, resolve_dir
+from agent_kit.mcp_servers._common import (
+    SKIP_DIRS,
+    iter_code_files,
+    project_root,
+    rel,
+    resolve_dir,
+)
 
 mcp = FastMCP("atlas-quality-mcp")
 
@@ -51,13 +57,69 @@ SECRET_PATTERNS = [
 SECRET_ALLOWLIST = re.compile(
     r"(?i)(example|sample|dummy|placeholder|your[_-]|xxx+|changeme|\*+"
     r"|user:(pwd|pass|password)@|<[^>]*>|\$\{)"
+    # 补：测试夹具里最常见的几类假值。早先只认 example/dummy，
+    # 结果 `sk-local…`、`sk-message…` 这类测试专用 token 全被当成真密钥报出来
+    # （评审 deepseek-harness 实测 8 条命中里 6 条是这类噪音）。
+    r"|\b(fake|mock|test|testing|localhost|localdev|local-dev|demo|stub|notreal|aaaa|0123)"
 )
+
+# 环境变量引用：这类赋值不是硬编码，值在运行时才确定。
+# `TWINE_PASSWORD="$CI_JOB_TOKEN"`、`PASSWORD: process.env.PW` 都该放行。
+ENV_REF = re.compile(
+    r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"          # $VAR / ${VAR}（shell、CI）
+    r"|%[A-Za-z_][A-Za-z0-9_]*%"                   # %VAR%（Windows）
+    r"|\$\([^)]+\)"                                # $(cmd) 形式
+    r"|process\.env(?:\.[A-Za-z_]\w*|\[[^\]]+\])"  # process.env.X / process.env['X']
+    r"|os\.environ(?:\.get\(|\[)"
+    r"|System\.getenv\(|System\.getProperty\("
+    r"|env::var\(|std::env::var\("
+    r"|Deno\.env\.get\(|import\.meta\.env\."
+)
+
+# 运行时由外部注入的配置文件本身不算硬编码
 
 # 本地开发默认凭据（postgres://atlas:atlas@localhost 这类）不算泄密。
 # 但**仍然要单独计数并在结论里提示**——换环境不改就是真事故，只是性质不同。
 LOCAL_HOSTS = re.compile(r"@(localhost|127\.0\.0\.1|\[::1\])([:/]|$)")
 
 TEXT_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".vue", ".java", ".go", ".rs", ".sql", ".sh", ".yml", ".yaml", ".toml", ".md", ".env", ".cfg", ".ini"}
+
+
+# ---------------------------------------------------------------------------
+# 测试文件的识别：必须覆盖多语言
+# ---------------------------------------------------------------------------
+# 为什么不能只认 `test_*.py`：拿这套工具评审 TypeScript / Go / Java 仓库时，
+# 明明有几百个 spec 文件却会报「没有测试」—— 而那是个**阻断项**，
+# 拿这种报告去评审别人的仓库，当场就会被打脸（评审 deepseek-harness 实测）。
+TEST_FILE_GLOBS = (
+    "test_*.py",
+    "*_test.py",
+    "*.test.js", "*.test.ts", "*.test.tsx", "*.test.jsx",
+    "*.spec.js", "*.spec.ts", "*.spec.tsx", "*.spec.jsx",
+    "*_test.go",
+    "*Test.java", "*Tests.java", "*IT.java",
+    "*_spec.rb",
+    "*_test.php",
+)
+
+# 用例计数：按后缀选正则。JS/TS 认 vitest / jest 三件套。
+CASE_PATTERNS: dict[str, tuple[str, ...]] = {
+    ".py": (r"^\s*(?:async\s+)?def\s+test_",),
+    ".js": (r"\b(?:it|test)\s*\(", r"\bdescribe\s*\("),
+    ".ts": (r"\b(?:it|test|describe)\s*\(",),
+    ".tsx": (r"\b(?:it|test|describe)\s*\(",),
+    ".jsx": (r"\b(?:it|test|describe)\s*\(",),
+    ".go": (r"^func\s+Test\w+\s*\(",),
+    ".java": (r"@Test\b",),
+    ".rb": (r"\b(?:it|describe)\b",),
+    ".php": (r"function\s+test\w+",),
+}
+
+# 测试目录：这些路径下的命中多半是测试夹具里的假密钥，按「提示」而不是「疑似泄密」记
+TEST_PATH_HINTS = (
+    "test", "tests", "__tests__", "spec", "specs", "e2e",
+    "fixtures", "fixture", "mocks", "__mocks__", "testdata",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +204,12 @@ def scan_secrets(subdir: str = ".", limit: int = 20) -> dict:
     """扫描代码里疑似硬编码的密钥、令牌、口令与带密码的连接串。
 
     **只报位置不报原文**（内容打码），避免把秘密再泄漏一遍到对话里。
-    命中不等于泄密，示例值与占位符已尽力剔除，仍需人工复核。
+
+    三层降噪（都是为了不拿噪音吓唬人——评审别人仓库时误报比漏报更伤）：
+      1. 示例值 / 占位符 → 直接跳过（`SECRET_ALLOWLIST`）
+      2. **环境变量引用** → 归入 `env_refs`，不是硬编码（`ENV_REF`）
+      3. **测试目录里的命中** → 归入 `test_hits`，测试夹具里的假 token 是正常的
+    命中不等于泄密，剩余项仍需人工复核。
 
     Args:
         subdir: 相对项目根目录的子目录
@@ -150,9 +217,12 @@ def scan_secrets(subdir: str = ".", limit: int = 20) -> dict:
     """
     root = resolve_dir(subdir)
     hits: list[dict] = []
+    env_refs: list[dict] = []
+    test_hits: list[dict] = []
     local_defaults: list[dict] = []
 
     for path in iter_code_files(root, TEXT_SUFFIXES):
+        in_test = _looks_like_test_path(path, root)
         try:
             lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError:
@@ -167,8 +237,15 @@ def scan_secrets(subdir: str = ".", limit: int = 20) -> dict:
                 raw = match.group(0)
                 masked = raw[:6] + "*" * max(len(raw) - 6, 4)
                 item = {"file": rel(path, root), "line": lineno, "kind": kind, "masked": masked}
-                # 本地默认凭据降级处理：单独统计，不算泄密但明确提示「换环境必须改」
-                (local_defaults if LOCAL_HOSTS.search(raw) else hits).append(item)
+                if ENV_REF.search(line):
+                    env_refs.append(item)
+                elif in_test:
+                    test_hits.append(item)
+                elif LOCAL_HOSTS.search(raw):
+                    # 本地默认凭据：不算泄密，但要提示「换环境不改就是事故」
+                    local_defaults.append(item)
+                else:
+                    hits.append(item)
                 break
             if len(hits) >= limit:
                 break
@@ -180,37 +257,92 @@ def scan_secrets(subdir: str = ".", limit: int = 20) -> dict:
         "hits": hits,
         "local_defaults": len(local_defaults),
         "local_sample": local_defaults[:5],
-        "note": "命中项需人工复核；示例值、占位符与 localhost 默认凭据已降级处理。",
+        "test_file_hits": len(test_hits),
+        "test_sample": test_hits[:5],
+        "env_refs": len(env_refs),
+        "env_ref_sample": env_refs[:5],
+        "note": (
+            "命中项需人工复核；示例值/占位符、环境变量引用、测试夹具、"
+            "localhost 默认凭据均已降级处理，不计入 count。"
+        ),
     }
+
+
+def _looks_like_test_path(path: Path, root: Path) -> bool:
+    """判断文件是否位于测试目录/测试命名下（用于把夹具里的假密钥降级）。"""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    name = path.name.lower()
+    if any(part.lower() in TEST_PATH_HINTS for part in parts[:-1]):
+        return True
+    return bool(
+        name.startswith("test_")
+        or ".test." in name
+        or ".spec." in name
+        or "_test." in name
+        or "_spec." in name
+    )
 
 
 # ---------------------------------------------------------------------------
 # 工具 4：测试现状
 # ---------------------------------------------------------------------------
 def check_tests(subdir: str = ".") -> dict:
-    """检查测试是否真的存在：tests 目录、测试文件数、用例数，以及无测试的代码目录。
+    """检查测试是否真的存在：测试文件数、用例数，以及有代码却没测试的目录。
 
     「有测试」和「测试覆盖了多少」是两回事，这里只回答前者——
-    覆盖率要真跑 pytest-cov，静态扫描给不了。
+    覆盖率要真跑 pytest-cov / vitest --coverage，静态扫描给不了。
+
+    识别范围覆盖 Python / JS / TS / Go / Java / Ruby / PHP 的常见约定。
+    早先只认 `test_*.py` + `def test_`，评审 TypeScript 仓库时会误报
+    「没有测试」这个阻断项（实测 deepseek-harness：9 套 vitest 配置被当成零测试）。
 
     Args:
         subdir: 相对项目根目录的子目录
     """
     root = resolve_dir(subdir)
-    test_files = [p for p in iter_code_files(root) if p.name.startswith("test_") or p.name.endswith("_test.py")]
+
+    matched: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in TEST_FILE_GLOBS:
+        for p in root.rglob(pattern):
+            if not p.is_file() or p in seen:
+                continue
+            if any(part in SKIP_DIRS for part in p.relative_to(root).parts):
+                continue
+            seen.add(p)
+            matched.append(p)
+
     cases = 0
-    for path in test_files:
+    by_lang: Counter[str] = Counter()
+    for path in sorted(matched):
+        patterns = CASE_PATTERNS.get(path.suffix.lower())
+        if not patterns:
+            continue
         try:
-            cases += len(re.findall(r"^\s*def test_", path.read_text(encoding="utf-8", errors="ignore"), re.MULTILINE))
+            text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        found = sum(len(re.findall(pat, text, re.MULTILINE)) for pat in patterns)
+        cases += found
+        if found:
+            by_lang[path.suffix.lower().lstrip(".")] += found
+
+    has_tests_dir = any(
+        (root / name).is_dir() for name in ("tests", "test", "__tests__", "spec")
+    ) or any(
+        any(h in p.relative_to(root).parts for h in TEST_PATH_HINTS) for p in matched[:50]
+    )
 
     return {
         "root": rel(root, project_root()),
-        "has_tests_dir": (root / "tests").is_dir(),
-        "test_files": len(test_files),
+        "has_tests_dir": has_tests_dir,
+        "test_files": len(matched),
         "test_cases": cases,
-        "test_files_sample": [rel(p, root) for p in test_files[:10]],
+        "cases_by_lang": dict(by_lang.most_common()),
+        "test_files_sample": [rel(p, root) for p in sorted(matched)[:10]],
     }
 
 

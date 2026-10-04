@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 import pytest
+from fake_secrets import FAKE_KEY_IN_TEST_DIR, FAKE_KEY_WITH_ALLOWLIST_WORD
 
 from agent_kit.builtin_skills import BUILTIN_SKILLS, PROJECT_ENGINEERING
 from agent_kit.mcp_client import ALL_SERVERS
@@ -152,6 +153,78 @@ def test_check_tests_finds_suite():
     assert tests["has_tests_dir"] is True
     assert tests["test_files"] > 0
     assert tests["test_cases"] > 0
+
+
+def test_check_tests_recognises_non_python_suites(tmp_path, monkeypatch):
+    """多语言识别：只认 test_*.py 会把 TS/Go 仓库判成「零测试」这个阻断项。
+
+    背景：评审 deepseek-harness（TypeScript）时误报「没有 tests 目录，
+    也没有任何测试用例」，而它有 9 套 vitest 配置。误报拿去评审别人的仓库会当场打脸。
+    """
+    root = tmp_path / "tsrepo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "widget.spec.ts").write_text(
+        "describe('widget', () => {\n  it('renders', () => {})\n  test('clicks', () => {})\n})\n",
+        encoding="utf-8",
+    )
+    (root / "pkg").mkdir()
+    (root / "pkg" / "handler.test.ts").write_text("it('works', () => {})\n", encoding="utf-8")
+    (root / "svc_test.go").write_text("func TestHealth(t *testing.T) {}\n", encoding="utf-8")
+    (root / "UserTest.java").write_text("@Test\nvoid works() {}\n", encoding="utf-8")
+    (root / "src" / "widget.spec.ts").write_text(
+        "describe('a', () => { it('b', () => {}) })\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(quality, "resolve_dir", lambda subdir=".": root)
+    result = quality.check_tests()
+
+    # 顶层没有 tests/ 目录，但确实有测试文件 —— 不能再判成「没有测试」
+    assert (root / "tests").is_dir() is False
+    assert result["test_files"] >= 3
+    assert result["test_cases"] >= 4
+    assert result["cases_by_lang"]  # 至少统计出一种语言
+
+
+def test_scan_secrets_demotes_env_refs_and_test_fixtures(tmp_path, monkeypatch):
+    """环境变量引用与测试夹具里的假密钥都不该算「疑似硬编码密钥」。
+
+    背景：评审 deepseek-harness 时 8 条命中全是噪音
+    （`$CI_JOB_TOKEN`、`PWD: '/home/user'`、测试里的 `sk-local…`）。
+    """
+    root = tmp_path / "repo"
+    (root / ".gitlab").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / ".gitlab" / "ci.yml").write_text(
+        'job:\n  script:\n    - export TWINE_PASSWORD="$CI_JOB_TOKEN"\n', encoding="utf-8"
+    )
+    # 刻意不含 local/test/fake 等词——它只能靠「在 tests 目录下」这条规则降级，
+    # 用来验证 test_file_hits 这条路径真的存在
+    (root / "tests" / "auth.spec.ts").write_text(
+        f"const key = '{FAKE_KEY_IN_TEST_DIR}';\n", encoding="utf-8"
+    )
+    # 而这个会被占位符白名单直接放行（连降级都不需要）
+    (root / "tests" / "util.spec.ts").write_text(
+        f"const key = '{FAKE_KEY_WITH_ALLOWLIST_WORD}';\n", encoding="utf-8"
+    )
+    (root / "app.py").write_text("API_KEY = process.env.DEPSEEK_KEY\n", encoding="utf-8")
+
+    monkeypatch.setattr(quality, "resolve_dir", lambda subdir=".": root)
+    result = quality.scan_secrets()
+
+    assert result["count"] == 0, "环境变量引用与测试夹具都不该算疑似硬编码密钥"
+    assert result["env_refs"] >= 1
+    assert result["test_file_hits"] >= 1
+
+
+def test_deliverable_checklist_accepts_safety_md(tmp_path, monkeypatch):
+    """SAFETY.md 是 SECURITY.md 的等价物，不能判成缺失（deepseek-harness 实测）。"""
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in ("README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SAFETY.md", ".gitignore"):
+        (root / name).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(doc_audit, "resolve_dir", lambda subdir=".": root)
+    result = doc_audit.project_checklist()
+    assert "SECURITY.md" not in result["missing"]
 
 
 def test_dependency_audit_shape():

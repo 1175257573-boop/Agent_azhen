@@ -50,7 +50,9 @@ sk-abcdef0123456789abcdef0123456789
 sk-abcdefghijklmnopqrstuvwxyz123456
 sk-original-from-system-env
 sk-unregistered-key-123456
-sk-unit-test-000000'
+sk-unit-test-000000
+sk-abcdef1234567890abcdef
+sk-local-test-token-000000'
 
 # 行级豁免标记：该行不参与扫描
 EXEMPT_RE='secret-scan:[[:space:]]*allow'

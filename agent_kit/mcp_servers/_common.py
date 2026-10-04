@@ -116,5 +116,13 @@ def iter_code_files(root: Path, suffixes: set[str] | None = None):
 
 
 def rel(path: Path, root: Path) -> str:
-    """相对路径字符串，输出里用它——绝对路径会把本机目录结构泄漏给模型。"""
-    return path.relative_to(root).as_posix()
+    """相对路径字符串，输出里用它——绝对路径会把本机目录结构泄漏给模型。
+
+    换根之后 `path` 可能不在 `root` 之下（理论上不该发生：resolve_dir 已校验），
+    这时退化成绝对路径而不是抛异常：取证工具因为路径问题崩掉是最差的结果，
+    报告少一条路径好过整个 server 起不来。
+    """
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()

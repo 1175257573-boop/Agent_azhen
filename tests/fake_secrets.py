@@ -39,3 +39,13 @@ FAKE_KEY_IN_DIALOG_ALT = "sk-abcdefghijklmnopqrstuvwxyz123456"
 
 # GitHub token 形态（仅测试 token 识别逻辑，从不用于任何真实仓库）
 FAKE_GITHUB_TOKEN = "ghp_abcdefghijklmnopqrstuv"
+
+# 放进「测试目录」里的假密钥：用于验证 scan_secrets 会把 tests/ 下的命中
+# 降级成 test_file_hits 而不是疑似泄密。
+# 刻意**不含** local/test/fake 等词——否则会被占位符白名单直接放行，
+# 就测不到「按目录降级」这条路径了。
+FAKE_KEY_IN_TEST_DIR = "sk-abcdef1234567890abcdef"
+
+# 同样放在测试目录，但**含** allowlist 关键词（local/test/fake），
+# 用来验证「占位符白名单」这条更早的降级路径确实生效。
+FAKE_KEY_WITH_ALLOWLIST_WORD = "sk-local-test-token-0000"

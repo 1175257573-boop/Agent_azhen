@@ -312,18 +312,34 @@ def rule_based_findings(evidence: dict[str, dict]) -> list[Finding]:
 
     tests = _data("check_tests")
     if tests:
-        if not tests.get("has_tests_dir"):
+        n_files = tests.get("test_files", 0) or 0
+        n_cases = tests.get("test_cases", 0) or 0
+        # 判据必须是「有目录 **或** 有测试文件」，早先只看 has_tests_dir，
+        # 于是 monorepo（顶层无 tests/、测试散在各 package 内）会被误判成
+        # 「零测试」这个阻断项 —— 而且 fact 文案说「没有任何用例」，
+        # 紧跟的 evidence 里却写着 test_cases=17，报告自相矛盾。
+        if not tests.get("has_tests_dir") and n_files == 0:
             findings.append(Finding(
                 dimension="tests", verdict=BLOCKER,
-                fact="没有 tests 目录，也没有任何测试用例",
-                evidence=f"check_tests: has_tests_dir=false, test_cases={tests.get('test_cases', 0)}",
+                fact="既没有测试目录，也没有任何测试文件",
+                evidence=f"check_tests: has_tests_dir=false, test_files=0, test_cases={n_cases}",
                 suggestion="至少补一条冒烟用例，钉住「能跑起来」这条底线",
             ))
-        elif tests.get("test_cases", 0) > 0:
+        elif n_cases == 0:
+            findings.append(Finding(
+                dimension="tests", verdict=BLOCKER,
+                fact=f"找到 {n_files} 个测试文件，但没识别出任何用例（可能是空壳或未被收录）",
+                evidence=f"check_tests: test_files={n_files}, test_cases=0",
+                suggestion="确认测试是否真的会被执行（CI 里跑一遍）",
+            ))
+        else:
+            langs = tests.get("cases_by_lang") or {}
+            lang_txt = "、".join(f"{k} {v}" for k, v in list(langs.items())[:4]) or "—"
             findings.append(Finding(
                 dimension="tests", verdict=GOOD,
-                fact=f"有 tests 目录，共 {tests['test_cases']} 个用例 / {tests.get('test_files', 0)} 个文件",
-                evidence=f"check_tests: has_tests_dir=true, test_cases={tests['test_cases']}",
+                fact=f"有测试：识别到 {n_cases} 处测试声明 / {n_files} 个测试文件",
+                evidence=f"check_tests: has_tests_dir={tests.get('has_tests_dir')}, "
+                         f"test_cases={n_cases}, 按语言={lang_txt}",
             ))
 
     deps = _data("dependency_audit")
@@ -359,8 +375,9 @@ def rule_based_findings(evidence: dict[str, dict]) -> list[Finding]:
         else:
             findings.append(Finding(
                 dimension="config", verdict=GOOD,
-                fact="未发现疑似硬编码密钥（示例值与占位符已剔除，仍需人工复核）",
-                evidence=f"scan_secrets: count=0, local_defaults={secrets.get('local_defaults', 0)}",
+                fact="未发现疑似硬编码密钥（示例值/占位符、环境变量引用、测试夹具、localhost 默认凭据均已降级）",
+                evidence=f"scan_secrets: count=0, local_defaults={secrets.get('local_defaults', 0)}, "
+                         f"env_refs={secrets.get('env_refs', 0)}, test_file_hits={secrets.get('test_file_hits', 0)}",
             ))
 
     checklist = _data("project_checklist")
