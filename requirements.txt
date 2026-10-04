@@ -10,6 +10,11 @@ fastmcp==4.0.4
 requests==2.34.2
 pydantic==2.13.5
 
+# 认证（server/routers/auth.py）：签发 access token 用。
+# 纯 Python 实现，无需编译 C 扩展，Windows 上装得动。
+# 口令散列没用 bcrypt/argon2，走标准库 hashlib.scrypt，少一个编译型依赖。
+PyJWT==2.14.0
+
 # 记忆后端：**默认 SQLite**，不用起任何服务
 langgraph-checkpoint-sqlite==3.1.1      # 短期记忆 checkpoint（官方实现）
 # 长期记忆 store 官方只提供 memory / postgres / redis 三种，
