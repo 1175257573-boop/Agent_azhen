@@ -225,12 +225,76 @@ def build_chat_model(settings: AgentSettings) -> Any:
     raise ValueError(f"未处理的 provider：{provider}")
 
 
+#: provider 的默认优先级。显式指定 LLM_PROVIDER 时不走这条链。
+PROVIDER_ORDER: tuple[str, ...] = ("openai", "deepseek", "dashscope", "anthropic")
+
+
+def available_providers() -> list[str]:
+    """所有**配了 key** 的 provider，按默认优先级排。"""
+    return [p for p in PROVIDER_ORDER if get_api_key(p)]
+
+
 def detect_provider() -> str:
-    """环境变量里配了哪个 Key，就默认用哪个 provider；都没配则回落到 fake。"""
-    for provider in ("openai", "deepseek", "dashscope", "anthropic"):
-        if get_api_key(provider):
-            return provider
-    return "fake"
+    """返回优先级最高的可用 provider；都没配 key 则为 `fake`。
+
+    只看"有没有配 key"，**不验证 key 能不能用**——保持零网络开销。
+    需要"配了就能用"的保证请用 `build_resilient_judge`。
+    """
+    found = available_providers()
+    return found[0] if found else "fake"
+
+
+def build_resilient_judge(*, providers: list[str] | None = None):
+    """返回一个"哪个能用就用哪个"的 judge。
+
+    为什么需要它
+    ------------
+    `detect_provider()` 只看有没有配 key。机器上同时存在**失效的**与**可用的**
+    key 时，它会挑中优先级更高的那个——实测本机同时有 `DEEPSEEK_API_KEY`（失效）
+    与 `DASHSCOPE_API_KEY`（可用），结果是明明有可用 key 却一路 401。
+
+    为什么不启动时探活
+    ------------------
+    探活要发网络请求，会让**每次启动**多等 1-2 秒，而绝大多数时候第一个就通。
+    所以改成**惰性回退**：第一次真正调用失败才换下一个，成功路径零开销。
+
+    `LLM_PROVIDER` 显式指定时**不做回退**——那是用户的明确意图，
+    静默换到另一个 provider 比重试更让人困惑。
+
+    Returns:
+        `(judge, candidates)`；judge 抛 `RuntimeError` 表示全部候选都试过了。
+    """
+    if providers is not None:
+        candidates = list(providers)
+    elif os.getenv("LLM_PROVIDER"):
+        candidates = [os.getenv("LLM_PROVIDER", "").lower()]
+    else:
+        candidates = available_providers()
+
+    state: dict[str, object] = {"idx": 0, "model": None, "failed": []}
+
+    def judge(prompt: str) -> str:
+        attempts: list[str] = []
+        while state["idx"] < len(candidates):        # type: ignore[operator]
+            provider = candidates[state["idx"]]      # type: ignore[index]
+            try:
+                if state["model"] is None:
+                    state["model"] = build_chat_model(AgentSettings(provider=provider))
+                return str(state["model"].invoke(prompt).content)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 —— 换下一个就是全部的处置
+                attempts.append(f"{provider}: {type(exc).__name__}")
+                failed = state["failed"]
+                if isinstance(failed, list):
+                    failed.append(provider)
+                state["idx"] = int(state["idx"]) + 1  # type: ignore[arg-type]
+                state["model"] = None
+        raise RuntimeError(
+            f"所有已配置的模型都调用失败（{len(attempts)} 次尝试）：" + "；".join(attempts)
+        )
+
+    judge.candidates = candidates                    # type: ignore[attr-defined]
+    judge.failed = lambda: list(state["failed"])     # type: ignore[attr-defined]
+    return judge, candidates
 
 
 # ---------------------------------------------------------------------------

@@ -155,26 +155,24 @@ def cmd_review(args: argparse.Namespace) -> int:
     """
     from collections.abc import Callable
 
-    from agent_kit.config import AgentSettings, build_chat_model
+    from agent_kit.config import build_resilient_judge
     from agent_kit.multi_agent import review as review_mod
 
     judge: Callable[[str], str] | None = None
-    # 走 AgentSettings 自己的解析（LLM_PROVIDER > atlas.toml > 自动探测），
-    # **不要直接调 detect_provider()**——那会绕过用户在环境变量里的显式指定。
-    # 实测踩过：本机同时有 DEEPSEEK_API_KEY（失效）与 DASHSCOPE_API_KEY（可用），
-    # 且 LLM_PROVIDER=dashscope；detect_provider() 按 openai→deepseek→dashscope
-    # 的顺序先命中失效的那个，于是明明配了可用 key 却报 401。
-    settings = AgentSettings()
-    provider = settings.provider
+    # build_resilient_judge 会按候选顺序尝试，失败自动换下一个。
+    # 实测踩过：本机同时有失效的 DEEPSEEK_API_KEY 与可用的 DASHSCOPE_API_KEY，
+    # 只看"有没有配 key"会挑中失效那个，于是明明配了可用 key 却一路 401。
+    # 显式设了 LLM_PROVIDER 时不做回退（那是用户的明确意图）。
+
+    candidates: list[str] = []
     if not args.no_judge:
         try:
-            if provider == "fake":
+            judge, candidates = build_resilient_judge()
+            if not candidates:
+                judge = None
                 print("[info] 未检测到任何模型 Key，本次为降级报告：只出证据清单，不下结论。")
             else:
-                model = build_chat_model(settings)
-
-                def judge(prompt: str) -> str:  # type: ignore[misc]
-                    return str(model.invoke(prompt).content)
+                print(f"[info] 模型候选（按优先级，失败自动切换）：{', '.join(candidates)}")
         except Exception as exc:  # noqa: BLE001 - 模型不可用时降级，不该让评审整个失败
             print(f"[warn] 模型不可用，转为降级报告：{exc}")
             judge = None
@@ -190,7 +188,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     print(text)
 
     if args.out:
-        dest = settings.sandbox_dir / args.out
+        from agent_kit.config import AgentSettings
+
+        dest = AgentSettings().sandbox_dir / args.out
         dest.write_text(text, encoding="utf-8")
         print(f"\n报告已写入：{dest}")
     return 0
