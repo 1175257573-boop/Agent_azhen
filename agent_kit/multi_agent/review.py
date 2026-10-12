@@ -477,6 +477,7 @@ def run_review(
     with_modules: bool = False,
     module_top_n: int = 9,
     module_batch: int = 3,
+    module_code_lines: int = 0,
 ) -> ReviewReport:
     """跑一次评审。
 
@@ -491,6 +492,7 @@ def run_review(
                      并不需要知道每个模块是干什么的。
         module_top_n: 分析多少个核心模块
         module_batch: 每批几个模块
+        module_code_lines: 每个模块附多少行真实代码（0 = 只给结构摘要）
 
     两段式：先串行取证（进程级 set_root，不能并发），再并行判断。
     """
@@ -517,6 +519,7 @@ def run_review(
             module_result = analyze_modules(
                 root_path, scan, judge,
                 top_n=module_top_n, batch_size=module_batch,
+                code_lines=module_code_lines,
                 max_workers=max_workers, timeout=timeout * 2,
             )
         except Exception as exc:  # noqa: BLE001 —— 模块分析失败不该让整份报告出不来

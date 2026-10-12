@@ -67,6 +67,7 @@ def build_module_digest(
     profile: ModuleProfile,
     *,
     max_chars: int = 2600,
+    code_lines: int = 0,
 ) -> str:
     """生成模块摘要。长度硬约束在 `max_chars` 内（超了会截断并标注）。
 
@@ -75,6 +76,10 @@ def build_module_digest(
         profile: 来自 `modules.scan_modules` 的画像
         max_chars: 摘要上限。默认 2600 ≈ 800 token，8 个模块也就 6k token，
             不会挤掉代码本身的空间。
+        code_lines: 每个文件附多少行**真实代码**。0 表示不附（默认）。
+            给到 40-60 时，模型能从"文件名 + 导出符号"升级到
+            "看得见 import 与首屏逻辑"——职责判断的准确度明显不同，
+            代价是每个模块多约 1.5k 字符。
     """
     mod = (root / profile.path).resolve()
     if not mod.is_dir():
@@ -94,6 +99,10 @@ def build_module_digest(
     big = _biggest_files(mod)
     if big:
         parts.append(big)
+    if code_lines > 0:
+        excerpt = _code_excerpt(mod, profile, code_lines)
+        if excerpt:
+            parts.append(excerpt)
 
     text = "\n\n".join(p for p in parts if p)
     if len(text) > max_chars:
@@ -216,6 +225,52 @@ def _relations(p: ModuleProfile) -> str:
     if p.deps_external:
         bits.append("外部依赖：" + "、".join(p.deps_external[:8]))
     return "【关系】" + "；".join(bits) if bits else ""
+
+
+def _code_excerpt(mod: Path, profile: ModuleProfile, max_lines: int,
+                  max_files: int = 2) -> str:
+    """附上真实代码片段。
+
+    挑文件的顺序：先入口文件，再最大的源文件——入口看"怎么启动"，
+    大文件看"主要逻辑在哪"。只取首屏若干行：能看出 import 依赖、
+    类与函数的骨架，而完整实现对判断职责没有额外信息量。
+    """
+    picks: list[Path] = []
+    for rel in profile.entry_points[:2]:
+        p = mod / rel
+        if p.is_file():
+            picks.append(p)
+    if len(picks) < max_files:
+        stats: list[tuple[int, Path]] = []
+        for path in mod.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in _SYMBOL_RULES:
+                continue
+            try:
+                if any(part in _SKIP for part in path.relative_to(mod).parts):
+                    continue
+                if path in picks:
+                    continue
+                stats.append((path.stat().st_size, path))
+            except OSError:
+                continue
+        stats.sort(key=lambda x: -x[0])
+        picks += [p for _, p in stats[: max_files - len(picks)]]
+
+    blocks: list[str] = []
+    for path in picks[:max_files]:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        # 掐掉首尾空行，否则前 40 行可能一大半是空行
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if not lines:
+            continue
+        head = "\n".join(lines[:max_lines])
+        more = f"\n…（共 {len(lines)} 行，只贴前 {max_lines} 行）" if len(lines) > max_lines else ""
+        blocks.append(f"--- {path.relative_to(mod).as_posix()} ---\n```\n{head}{more}\n```")
+    return "【代码片段】\n" + "\n\n".join(blocks) if blocks else ""
 
 
 def _biggest_files(mod: Path) -> str:

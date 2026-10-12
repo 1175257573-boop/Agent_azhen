@@ -114,6 +114,7 @@ def analyze_modules(
     top_n: int = DEFAULT_TOP_N,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_chars: int = 2600,
+    code_lines: int = 0,
     max_workers: int = 3,
     timeout: float = 120.0,
 ) -> ModuleAnalysisResult:
@@ -127,7 +128,14 @@ def analyze_modules(
     if not targets:
         return ModuleAnalysisResult(degraded=judge is None)
 
-    digests = {p.name: build_module_digest(root, p, max_chars=max_chars) for p in targets}
+    # code_lines>0 时上限自动放宽——片段是深读的本钱，
+    # 但仍要封顶，否则一个 5 万行的模块会把整批 prompt 顶爆。
+    if code_lines > 0:
+        max_chars = max(max_chars, 4200)
+    digests = {
+        p.name: build_module_digest(root, p, max_chars=max_chars, code_lines=code_lines)
+        for p in targets
+    }
     result = ModuleAnalysisResult(
         modules=[_placeholder(p) for p in targets],
         degraded=judge is None,
@@ -153,7 +161,7 @@ def analyze_modules(
 
     def _worker(task: TaskSpec) -> list[dict]:
         group = [p for p in targets if p.name in (task.shared or [])]
-        return _parse(judge(_build_prompt(group, digests)))
+        return _parse(judge(_build_prompt(group, digests, has_code=code_lines > 0)))
 
     results: list[TaskResult] = run_fanout(
         tasks, _worker, max_workers=max_workers, timeout=timeout)
@@ -209,8 +217,15 @@ def _failed(p: ModuleProfile, reason: str) -> ModuleUnderstanding:
     )
 
 
-def _build_prompt(group: list[ModuleProfile], digests: dict[str, str]) -> str:
+def _build_prompt(group: list[ModuleProfile], digests: dict[str, str],
+                  *, has_code: bool = False) -> str:
     blocks = [_SYSTEM_PROMPT]
+    if has_code:
+        blocks.append(
+            "注意：下面每个模块都附了**真实代码片段**（入口文件与主要源文件的首屏）。"
+            "看到 import 就能判断它依赖什么，看到类与函数的声明就能判断它提供什么——"
+            "请把这些写进 `evidence`，而不是只依据文件名猜测。"
+        )
     for p in group:
         blocks.append(f"### 模块 {p.name}（路径 {p.path}）\n{digests.get(p.name, '（摘要缺失）')}")
     return "\n\n".join(blocks)

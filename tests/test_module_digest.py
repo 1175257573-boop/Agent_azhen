@@ -182,3 +182,109 @@ def test_build_digests_survives_one_failure(tmp_path, monkeypatch):
     assert len(out) == 2, "失败也要占位，不能少一个模块"
     assert any("失败" in v for v in out.values())
     assert any("画像" in v for v in out.values()), "其余模块应正常产出"
+
+
+# ------------------------------------------------------------ 代码片段
+
+
+def test_no_code_excerpt_by_default(tmp_path):
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    _ts_module(tmp_path)
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0])
+    assert "【代码片段】" not in d, "默认不该贴代码——那是 opt-in 的成本项"
+
+
+def test_code_excerpt_contains_real_code(tmp_path):
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    _ts_module(tmp_path)
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=40)
+    assert "【代码片段】" in d
+    assert "export class App" in d or "import " in d
+    assert "--- src/main.ts ---" in d
+
+
+def test_code_excerpt_respects_line_budget(tmp_path):
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    mod = _ts_module(tmp_path)
+    _w(mod / "src" / "big.ts", "\n".join(f"const line{i} = {i}" for i in range(500)))
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=10)
+    block = d.split("【代码片段】")[1]
+    assert "只贴前 10 行" in block, "截断必须说明贴了多少，否则模型会以为看到全部"
+    assert "line499" not in block
+
+
+def test_code_excerpt_caps_total_length(tmp_path):
+    """开了代码片段也不能让摘要失控——整体上限仍要生效。"""
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    mod = _ts_module(tmp_path)
+    for i in range(6):
+        _w(mod / "src" / f"f{i}.ts", "\n".join(f"export const a{i}_{j} = {j}" for j in range(300)))
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=60, max_chars=2600)
+    assert len(d) <= 2600 + 80, f"代码片段把摘要顶爆了：{len(d)}"
+
+
+def test_entry_file_is_preferred(tmp_path):
+    """入口文件是判断"怎么启动"的第一手材料，应优先于最大的文件。"""
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    mod = _ts_module(tmp_path)
+    _w(mod / "huge.ts", "\n".join(f"const big{j} = {j}" for j in range(1000)))
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=20)
+    assert "--- src/main.ts ---" in d, "入口文件应当被优先贴出"
+
+
+# ------------------------------------------------------------ 代码片段
+
+
+def test_no_code_excerpt_by_default(tmp_path):
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    _ts_module(tmp_path)
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0])
+    assert "【代码片段】" not in d, "默认不该贴代码——那是 opt-in 的成本项"
+
+
+def test_code_excerpt_contains_real_code(tmp_path):
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    _ts_module(tmp_path)
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=40)
+    assert "【代码片段】" in d
+    assert "export class App" in d or "import " in d
+    assert "--- src/main.ts ---" in d
+
+
+def test_code_excerpt_respects_line_budget(tmp_path):
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    mod = _ts_module(tmp_path)
+    _w(mod / "src" / "big.ts", "\n".join(f"const line{i} = {i}" for i in range(500)))
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=10)
+    block = d.split("【代码片段】")[1]
+    assert "只贴前 10 行" in block, "截断必须说明贴了多少，否则模型会以为看到全部"
+    assert "line499" not in block
+
+
+def test_code_excerpt_caps_total_length(tmp_path):
+    """开了代码片段也不能让摘要失控——整体上限仍要生效。"""
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    mod = _ts_module(tmp_path)
+    for i in range(6):
+        _w(mod / "src" / f"f{i}.ts", "\n".join(f"export const a{i}_{j} = {j}" for j in range(300)))
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=60, max_chars=2600)
+    assert len(d) <= 2600 + 80, f"代码片段把摘要顶爆了：{len(d)}"
+
+
+def test_entry_file_is_preferred(tmp_path):
+    """入口文件是判断"怎么启动"的第一手材料，应优先于最大的文件。"""
+    _w(tmp_path / "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n")
+    mod = _ts_module(tmp_path)
+    _w(mod / "huge.ts", "\n".join(f"const big{j} = {j}" for j in range(1000)))
+    scan = modules.scan_modules(tmp_path)
+    d = build_module_digest(tmp_path, scan.modules[0], code_lines=20)
+    assert "--- src/main.ts ---" in d, "入口文件应当被优先贴出"

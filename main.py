@@ -183,6 +183,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         with_modules=args.modules,
         module_top_n=args.module_top,
         module_batch=args.module_batch,
+        module_code_lines=args.module_code_lines,
     )
     text = review_mod.render_markdown(report)
     print(text)
@@ -476,6 +477,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument(
         "--module-batch", type=int, default=3,
         help="每批几个模块，默认 3（太多会互相干扰：模型会把相邻模块职责搞混）",
+    )
+    p_review.add_argument(
+        "--module-code-lines", type=int, default=0,
+        help="每个模块附多少行真实代码（入口与主要源文件的首屏），0 = 不附。"
+             "给到 40-60 能明显提升职责判断准确度，代价是每个模块多约 1.5k 字符",
     )
     p_review.set_defaults(func=cmd_review)
 
