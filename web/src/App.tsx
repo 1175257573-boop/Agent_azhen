@@ -4,6 +4,7 @@ import { api } from './api'
 import Approvals from './pages/Approvals'
 import Chat from './pages/Chat'
 import Memory from './pages/Memory'
+import Review from './pages/Review'
 import Queue from './pages/Queue'
 import Sessions from './pages/Sessions'
 import Settings from './pages/Settings'
@@ -11,13 +12,14 @@ import ConfirmDialog from './components/ConfirmDialog'
 import { useStore } from './store'
 import type { HealthPayload, SystemInfo } from './types'
 
-type PageKey = 'chat' | 'approvals' | 'sessions' | 'queue' | 'settings' | 'memory'
+type PageKey = 'chat' | 'approvals' | 'sessions' | 'queue' | 'review' | 'settings' | 'memory'
 
 const PAGES: { key: PageKey; label: string; hint: string }[] = [
   { key: 'chat', label: '聊天', hint: '对话与工具调用' },
   { key: 'approvals', label: '审批', hint: '待人工确认的动作' },
   { key: 'sessions', label: '会话', hint: '会话清单与历史' },
   { key: 'queue', label: '队列', hint: '排队中的消息' },
+  { key: 'review', label: '评审', hint: '工程健康度与模块职责' },
   { key: 'settings', label: '配置', hint: '模式 / MCP / 密钥' },
   { key: 'memory', label: '记忆', hint: '后端状态与长期偏好' },
 ]
@@ -129,6 +131,7 @@ export default function App() {
           {page === 'approvals' && <Approvals />}
           {page === 'sessions' && <Sessions />}
           {page === 'queue' && <Queue />}
+          {page === 'review' && <Review />}
           {page === 'settings' && <Settings />}
           {page === 'memory' && <Memory />}
         </section>

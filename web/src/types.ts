@@ -150,3 +150,30 @@ export interface HealthPayload {
   memory_backends?: Record<string, string>
   [key: string]: unknown
 }
+
+// ---------------------------------------------------------------- 工程评审
+export type ReviewState = 'queued' | 'running' | 'done' | 'failed'
+
+export interface ReviewSubmitBody {
+  target: string
+  with_modules?: boolean
+  module_top_n?: number
+  module_batch?: number
+  module_code_lines?: number
+  no_judge?: boolean
+}
+
+export interface ReviewJobSummary {
+  id: string
+  target: string
+  options: Record<string, unknown>
+  state: ReviewState
+  created_at: string
+  elapsed_s: number
+  error: string
+  module_count: number
+}
+
+export interface ReviewJobDetail extends ReviewJobSummary {
+  markdown?: string
+}

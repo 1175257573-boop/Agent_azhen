@@ -8,6 +8,9 @@ import type {
   MessageOut,
   Preference,
   QueuedOut,
+  ReviewJobDetail,
+  ReviewJobSummary,
+  ReviewSubmitBody,
   StreamEvent,
   SystemInfo,
   ThreadBrief,
@@ -67,6 +70,17 @@ export const api = {
   health: () => request<HealthPayload>('/api/health', { params: { probe_backends: 'false' } }),
   info: () => request<SystemInfo>('/api/info'),
   modes: () => request<Record<string, string>>('/api/modes'),
+
+  // ------------------------------------------------------------ 工程评审
+  submitReview: (body: ReviewSubmitBody) =>
+    request<ReviewJobSummary>('/api/review', { method: 'POST', ...json(body) }),
+  reviewJobs: (limit = 10) =>
+    request<{ jobs: ReviewJobSummary[] }>('/api/review', { params: { limit } }),
+  reviewJob: (id: string) => request<ReviewJobDetail>(`/api/review/${encodeURIComponent(id)}`),
+  cancelReview: (id: string) =>
+    request<{ cancelled: boolean; reason: string }>(`/api/review/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
   // ------------------------------------------------------------ 会话
   threads: () => request<ThreadBrief[]>('/api/chat/threads'),

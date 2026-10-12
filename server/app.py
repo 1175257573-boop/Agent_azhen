@@ -76,7 +76,7 @@ def create_app() -> FastAPI:
     )
 
     from server.errors import register_exception_handlers, register_request_logging
-    from server.routers import chat, credentials, memory, system
+    from server.routers import chat, credentials, memory, review, system
 
     # 顺序有讲究：先装异常处理器/日志，再挂路由
     register_exception_handlers(app)
@@ -86,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(memory.router)
     app.include_router(credentials.router)
+    app.include_router(review.router)
 
     # 前端托管必须最后挂：里面有 /{full_path:path} 的 SPA 回落
     from server.static_site import mount_frontend
